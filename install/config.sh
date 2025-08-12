@@ -11,7 +11,7 @@ VERSION="latest"
 # Knowledge base configuration
 
 REMOTE_LDB_LOCATION=/ldb/compressed/full/latest/oss/
-FREE_SPACE_REQUIRED="${FREE_SPACE_REQUIRED:-18}"
+FREE_SPACE_REQUIRED="${FREE_SPACE_REQUIRED:-19200}"
 REAL_LDB_LOCATION=""
 LDB_LOCATION=/var/lib/ldb
 TMP_UPDATE=""

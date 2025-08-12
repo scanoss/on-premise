@@ -35,11 +35,11 @@ function download_kb () {
   fi
 
   # Check for free space in LDB directory
-  freespace=$(df --output=avail -B1T $LDB_LOCATION | awk 'NR==2 {print $1}')
+  freespace=$(df --output=avail -B1G $LDB_LOCATION | awk 'NR==2 {print $1}')
   if awk -v freespace="$freespace" -v FREE_SPACE_REQUIRED="$FREE_SPACE_REQUIRED" 'BEGIN { if (freespace > FREE_SPACE_REQUIRED) exit 0; else exit 1 }'; then
-    echo "Free space is over $FREE_SPACE_REQUIRED TB"
+    echo "Free space is over $FREE_SPACE_REQUIRED GB"
   else
-    echo "Free space is not over $FREE_SPACE_REQUIRED TB"
+    echo "Free space is not over $FREE_SPACE_REQUIRED GB"
     exit 1
   fi
 
