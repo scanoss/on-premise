@@ -10,13 +10,9 @@ VERSION="latest"
 
 # Knowledge base configuration
 
-REMOTE_LDB_LOCATION=/ldb/compressed/full/latest/oss/
-FREE_SPACE_REQUIRED="${FREE_SPACE_REQUIRED:-21800}"
-TEST_FREE_SPACE_REQUIRED="${TEST_FREE_SPACE_REQUIRED:-700}"
 LDB_LOCATION=/var/lib/ldb
-TMP_UPDATE=""
 
-# SFTP credentials 
+# SFTP credentials
 SCANOSS_SFTP_USER=""
 SCANOSS_SFTP_PASSWORD=""
 
