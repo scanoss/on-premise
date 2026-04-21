@@ -62,6 +62,11 @@ usage() {
     exit 0
 }
 
+# lftp options applied to every invocation. sftp:auto-confirm makes lftp
+# accept unknown host keys instead of failing with a cryptic error — matches
+# the -oStrictHostKeyChecking=no used on the sftp fallback.
+LFTP_SETTINGS="set sftp:auto-confirm yes;"
+
 # Run an SFTP batch command and return stdout.
 sftp_cmd() {
     local cmd="$1"
@@ -74,7 +79,7 @@ sftp_cmd() {
 lftp_cmd() {
     local cmd="$1"
     lftp -u "$SFTP_USER","$SFTP_PASS" \
-        -e "$cmd; exit" \
+        -e "${LFTP_SETTINGS} $cmd; exit" \
         "sftp://${SFTP_HOST}:${SFTP_PORT}" 2>/dev/null
 }
 
@@ -96,7 +101,7 @@ read_remote_file() {
     rm -f "$tmpfile"
     if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
         lftp -u "$SFTP_USER","$SFTP_PASS" \
-            -e "get $remote_path -o $tmpfile; exit" \
+            -e "${LFTP_SETTINGS} get $remote_path -o $tmpfile; exit" \
             "sftp://${SFTP_HOST}:${SFTP_PORT}" &>/dev/null
     else
         sftp_cmd "get $remote_path $tmpfile" >/dev/null 2>&1
@@ -125,7 +130,7 @@ download_path() {
     if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
         echo "Downloading ${remote_path} with lftp (${LFTP_THREADS} parallel threads, resumable)..."
         lftp -u "$SFTP_USER","$SFTP_PASS" \
-            -e "mirror -c -P ${LFTP_THREADS} $remote_path $local_path; exit" \
+            -e "${LFTP_SETTINGS} mirror -c -P ${LFTP_THREADS} $remote_path $local_path; exit" \
             "sftp://${SFTP_HOST}:${SFTP_PORT}"
     else
         echo "Downloading ${remote_path} with sftp..."
@@ -297,7 +302,9 @@ kb_download_test() {
     local test_dest="${dest_input:-$default_dest}"
     mkdir -p "$(dirname "$test_dest")"
 
-    # Fetch metadata and check disk space (optional — test KB may not ship metadata)
+    # Fetch metadata and check disk space. The test KB is not guaranteed to
+    # ship a metadata.json, so treat its absence as expected rather than a
+    # warning condition.
     echo
     echo "Fetching test KB metadata..."
     local metadata_content
@@ -336,7 +343,7 @@ kb_download_test() {
             fi
         fi
     else
-        echo "WARN: metadata.json not found on server, skipping disk space check."
+        echo "Note: test KB does not include metadata.json; skipping disk space check."
     fi
 
     # Prompt for thread count if using lftp
