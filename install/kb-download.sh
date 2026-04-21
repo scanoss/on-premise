@@ -71,7 +71,7 @@ LFTP_SETTINGS="set sftp:auto-confirm yes;"
 sftp_cmd() {
     local cmd="$1"
     sshpass -p "$SFTP_PASS" \
-        sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=no \
+        sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new \
         "$SFTP_USER@$SFTP_HOST" <<< "$cmd" 2>/dev/null
 }
 
@@ -120,25 +120,38 @@ list_remote_items() {
     fi
 }
 
-# Download a remote directory or file to a local path.
+# Download a remote directory or file to a local path. Writes the contents
+# of $remote_path into $local_path (matches lftp mirror semantics on both
+# branches, even when the user-supplied basename differs from the remote).
 download_path() {
     local remote_path="$1"
     local local_path="$2"
 
-    mkdir -p "$local_path"
-
     if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
+        mkdir -p "$local_path"
         echo "Downloading ${remote_path} with lftp (${LFTP_THREADS} parallel threads, resumable)..."
         lftp -u "$SFTP_USER","$SFTP_PASS" \
             -e "${LFTP_SETTINGS} mirror -c -P ${LFTP_THREADS} $remote_path $local_path; exit" \
             "sftp://${SFTP_HOST}:${SFTP_PORT}"
     else
         echo "Downloading ${remote_path} with sftp..."
-        local parent_dir
+        # sftp -r always writes to $parent_dir/$(basename $remote_path), so
+        # download into the parent and rename if the user's destination has
+        # a different basename.
+        local parent_dir remote_base local_base
         parent_dir=$(dirname "$local_path")
+        remote_base=$(basename "$remote_path")
+        local_base=$(basename "$local_path")
+        mkdir -p "$parent_dir"
+
         sshpass -p "$SFTP_PASS" \
-            sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=no \
+            sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new \
             -r "$SFTP_USER@$SFTP_HOST:$remote_path" "$parent_dir"
+
+        if [[ "$remote_base" != "$local_base" ]]; then
+            rm -rf "$local_path"
+            mv "$parent_dir/$remote_base" "$local_path"
+        fi
     fi
 }
 
