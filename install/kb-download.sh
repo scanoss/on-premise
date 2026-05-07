@@ -33,6 +33,18 @@ SFTP_USER=""
 SFTP_PASS=""
 LFTP_THREADS="25"
 
+# Non-interactive mode and per-prompt overrides.
+# When NON_INTERACTIVE is set the script never reads from stdin: missing
+# required values are fatal, defaults are taken for optional values, and
+# all confirmation prompts are auto-accepted (with -f required to override
+# the disk-space safety check).
+NON_INTERACTIVE=""
+KB_VERSION=""        # full/update version; defaults to LATEST.txt when empty
+OSS_DEST=""          # test-mode destination, or full-mode 'oss' destination
+REST_DEST=""         # full-mode destination for non-oss items
+DOWNLOAD_BASE=""     # update-mode download base directory
+FORCE_DISK=""        # continue download when free space < required size
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -48,9 +60,11 @@ die() {
 }
 
 usage() {
-    echo "Usage: $0 [-m mode] [-h host] [-P port] [-u user] [-p password] [-t threads] [-d tool]"
+    echo "Usage: $0 [-m mode] [-h host] [-P port] [-u user] [-p password]"
+    echo "          [-t threads] [-d tool] [-V version] [-o path] [-r path]"
+    echo "          [-D path] [-y] [-f]"
     echo
-    echo "Options:"
+    echo "Connection / mode options:"
     echo "  -m    Download mode: full, update, or test"
     echo "  -h    SFTP host"
     echo "  -P    SFTP port"
@@ -58,6 +72,23 @@ usage() {
     echo "  -p    SFTP password"
     echo "  -t    lftp parallel threads (default: ${LFTP_THREADS})"
     echo "  -d    Download tool: lftp or sftp"
+    echo
+    echo "Path / version overrides (skip the matching interactive prompt):"
+    echo "  -V    KB version (full/update mode); default: latest from LATEST.txt"
+    echo "  -o    Destination path:"
+    echo "          test mode -> test-KB destination (default: /var/lib/ldb/oss)"
+    echo "          full mode -> 'oss' folder destination (default: /var/lib/ldb/oss)"
+    echo "  -r    full mode: destination for non-oss items"
+    echo "        (default: /tmp/scanoss_kb_full_<version>)"
+    echo "  -D    update mode: download base directory"
+    echo "        (default: /tmp/scanoss_kb_update; final path is <D>/<version>)"
+    echo
+    echo "Non-interactive flags:"
+    echo "  -y    Don't prompt; use defaults for unspecified values, auto-confirm"
+    echo "        download. Required values (-m, -h, -P, -u, -p) must be supplied."
+    echo "  -f    Force download even if free disk space is below required size"
+    echo "        (only meaningful with -y; without -y you are prompted)"
+    echo
     echo "  -?    Show this help"
     exit 0
 }
@@ -193,7 +224,7 @@ download_full_kb() {
 # ---------------------------------------------------------------------------
 
 parse_args() {
-    while getopts "m:h:P:u:p:t:d:?" opt; do
+    while getopts "m:h:P:u:p:t:d:V:o:r:D:yf?" opt; do
         case $opt in
             m) MODE="$OPTARG" ;;
             h) SFTP_HOST="$OPTARG" ;;
@@ -202,6 +233,12 @@ parse_args() {
             p) SFTP_PASS="$OPTARG" ;;
             t) LFTP_THREADS="$OPTARG" ;;
             d) DOWNLOAD_TOOL="$OPTARG" ;;
+            V) KB_VERSION="$OPTARG" ;;
+            o) OSS_DEST="$OPTARG" ;;
+            r) REST_DEST="$OPTARG" ;;
+            D) DOWNLOAD_BASE="$OPTARG" ;;
+            y) NON_INTERACTIVE=1 ;;
+            f) FORCE_DISK=1 ;;
             ?) usage ;;
             *) usage ;;
         esac
@@ -230,6 +267,9 @@ init_download_tool() {
     if command -v lftp &>/dev/null; then
         DOWNLOAD_TOOL="lftp"
         echo "Using lftp for downloads (parallel, resumable)."
+    elif [[ -n "$NON_INTERACTIVE" ]]; then
+        DOWNLOAD_TOOL="sftp"
+        echo "lftp is not installed; falling back to sftp (-y)."
     else
         echo
         echo "lftp is not installed. lftp provides faster parallel downloads."
@@ -264,6 +304,10 @@ prompt_missing_mode() {
         return
     fi
 
+    if [[ -n "$NON_INTERACTIVE" ]]; then
+        die "Mode is required in non-interactive mode. Pass -m full|update|test."
+    fi
+
     echo
     echo "What do you want to download?"
     echo "  1) Full KB"
@@ -282,6 +326,14 @@ prompt_missing_mode() {
 }
 
 prompt_missing_connection() {
+    if [[ -n "$NON_INTERACTIVE" ]]; then
+        [[ -n "$SFTP_HOST" ]] || die "SFTP host is required (-h) in non-interactive mode."
+        [[ -n "$SFTP_PORT" ]] || die "SFTP port is required (-P) in non-interactive mode."
+        [[ -n "$SFTP_USER" ]] || die "SFTP username is required (-u) in non-interactive mode."
+        [[ -n "$SFTP_PASS" ]] || die "SFTP password is required (-p) in non-interactive mode."
+        return
+    fi
+
     echo
     if [[ -z "$SFTP_HOST" ]]; then
         read -p "SFTP host: " SFTP_HOST
@@ -310,9 +362,16 @@ kb_download_test() {
     local default_dest="/var/lib/ldb/oss"
 
     # Destination
-    echo
-    read -p "Destination for test KB [${default_dest}]: " dest_input
-    local test_dest="${dest_input:-$default_dest}"
+    local test_dest
+    if [[ -n "$OSS_DEST" ]]; then
+        test_dest="$OSS_DEST"
+    elif [[ -n "$NON_INTERACTIVE" ]]; then
+        test_dest="$default_dest"
+    else
+        echo
+        read -p "Destination for test KB [${default_dest}]: " dest_input
+        test_dest="${dest_input:-$default_dest}"
+    fi
     mkdir -p "$(dirname "$test_dest")"
 
     # Fetch metadata and check disk space. The test KB is not guaranteed to
@@ -341,16 +400,24 @@ kb_download_test() {
             if (( local_free < remote_size )); then
                 echo
                 echo "WARNING: Not enough disk space. Need ${remote_hr} but only ${local_hr} available."
-                log "Insufficient disk space for test KB: need ${remote_hr}, have ${local_hr} (user confirm)"
-                while true; do
-                    read -p "Continue download anyway? [y/N] " yn
-                    yn="${yn:-n}"
-                    case $yn in
-                        [Yy]*) echo "Continuing despite low disk space."; break ;;
-                        [Nn]*) echo "Aborting download."; return ;;
-                        *)     echo "Please answer yes (y) or no (n)." ;;
-                    esac
-                done
+                log "Insufficient disk space for test KB: need ${remote_hr}, have ${local_hr}"
+                if [[ -n "$NON_INTERACTIVE" ]]; then
+                    if [[ -n "$FORCE_DISK" ]]; then
+                        echo "Continuing despite low disk space (-f)."
+                    else
+                        die "Aborting download: low disk space. Re-run with -f to override."
+                    fi
+                else
+                    while true; do
+                        read -p "Continue download anyway? [y/N] " yn
+                        yn="${yn:-n}"
+                        case $yn in
+                            [Yy]*) echo "Continuing despite low disk space."; break ;;
+                            [Nn]*) echo "Aborting download."; return ;;
+                            *)     echo "Please answer yes (y) or no (n)." ;;
+                        esac
+                    done
+                fi
             else
                 echo "Disk space OK."
             fi
@@ -360,36 +427,32 @@ kb_download_test() {
     fi
 
     # Prompt for thread count if using lftp
-    if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
+    if [[ "$DOWNLOAD_TOOL" == "lftp" && -z "$NON_INTERACTIVE" ]]; then
         read -p "lftp parallel threads [${LFTP_THREADS}]: " threads_input
         LFTP_THREADS="${threads_input:-$LFTP_THREADS}"
     fi
 
-    # Download
+    # Final confirmation (skipped under -y)
     echo
-    while true; do
-        read -p "Download test KB to ${test_dest}? [Y/n] " yn
-        yn="${yn:-y}"
-        case $yn in
-            [Yy]*)
-                log "Starting download of test KB to ${test_dest}"
-                download_path "$remote_path" "$test_dest"
-                echo
-                echo "Test KB downloaded to ${test_dest}"
-                log "Test KB downloaded to ${test_dest}"
-                echo
-                echo "Finished downloading test KB."
-                break
-                ;;
-            [Nn]*)
-                echo "Skipping download."
-                return
-                ;;
-            *)
-                echo "Please answer yes (y) or no (n)."
-                ;;
-        esac
-    done
+    if [[ -z "$NON_INTERACTIVE" ]]; then
+        while true; do
+            read -p "Download test KB to ${test_dest}? [Y/n] " yn
+            yn="${yn:-y}"
+            case $yn in
+                [Yy]*) break ;;
+                [Nn]*) echo "Skipping download."; return ;;
+                *)     echo "Please answer yes (y) or no (n)." ;;
+            esac
+        done
+    fi
+
+    log "Starting download of test KB to ${test_dest}"
+    download_path "$remote_path" "$test_dest"
+    echo
+    echo "Test KB downloaded to ${test_dest}"
+    log "Test KB downloaded to ${test_dest}"
+    echo
+    echo "Finished downloading test KB."
 }
 
 kb_download() {
@@ -451,20 +514,39 @@ kb_download() {
         return
     fi
 
-    # Let user pick a version, defaulting to latest
-    echo
-    local default_sel="${latest_index:-${#version_list[@]}}"
-    local selection
-    while true; do
-        read -p "Select a ${label} version to download [1-${#version_list[@]}] (default: ${default_sel}): " selection
-        selection="${selection:-$default_sel}"
-        if [[ "$selection" =~ ^[0-9]+$ ]] && (( selection >= 1 && selection <= ${#version_list[@]} )); then
-            break
+    # Resolve version: -V wins; otherwise default to latest interactively or under -y.
+    local kb_version=""
+    if [[ -n "$KB_VERSION" && "$KB_VERSION" != "latest" ]]; then
+        # Validate that the requested version is one of the discovered ones.
+        local v
+        for v in "${version_list[@]}"; do
+            if [[ "$v" == "$KB_VERSION" ]]; then
+                kb_version="$v"
+                break
+            fi
+        done
+        [[ -n "$kb_version" ]] || die "Requested version '${KB_VERSION}' not found among available ${label} versions."
+    elif [[ -n "$NON_INTERACTIVE" || "$KB_VERSION" == "latest" ]]; then
+        if [[ -n "$latest_index" ]]; then
+            kb_version="${version_list[$((latest_index - 1))]}"
+        else
+            kb_version="${version_list[$(( ${#version_list[@]} - 1 ))]}"
         fi
-        echo "Invalid selection. Please enter a number between 1 and ${#version_list[@]}."
-    done
+    else
+        echo
+        local default_sel="${latest_index:-${#version_list[@]}}"
+        local selection
+        while true; do
+            read -p "Select a ${label} version to download [1-${#version_list[@]}] (default: ${default_sel}): " selection
+            selection="${selection:-$default_sel}"
+            if [[ "$selection" =~ ^[0-9]+$ ]] && (( selection >= 1 && selection <= ${#version_list[@]} )); then
+                break
+            fi
+            echo "Invalid selection. Please enter a number between 1 and ${#version_list[@]}."
+        done
+        kb_version="${version_list[$((selection - 1))]}"
+    fi
 
-    local kb_version="${version_list[$((selection - 1))]}"
     echo
     echo "Selected ${label}: $kb_version"
     log "Selected ${label} version: $kb_version"
@@ -474,17 +556,39 @@ kb_download() {
     if [[ "$mode" == "full" ]]; then
         local default_oss_dest="/var/lib/ldb/oss"
         local default_rest_dest="/tmp/scanoss_kb_full_${kb_version}"
-        echo
-        read -p "Destination for 'oss' folder [${default_oss_dest}]: " oss_input
-        oss_dest="${oss_input:-$default_oss_dest}"
-        read -p "Destination for remaining files/folders [${default_rest_dest}]: " rest_input
-        rest_dest="${rest_input:-$default_rest_dest}"
+
+        if [[ -n "$OSS_DEST" ]]; then
+            oss_dest="$OSS_DEST"
+        elif [[ -n "$NON_INTERACTIVE" ]]; then
+            oss_dest="$default_oss_dest"
+        else
+            echo
+            read -p "Destination for 'oss' folder [${default_oss_dest}]: " oss_input
+            oss_dest="${oss_input:-$default_oss_dest}"
+        fi
+
+        if [[ -n "$REST_DEST" ]]; then
+            rest_dest="$REST_DEST"
+        elif [[ -n "$NON_INTERACTIVE" ]]; then
+            rest_dest="$default_rest_dest"
+        else
+            read -p "Destination for remaining files/folders [${default_rest_dest}]: " rest_input
+            rest_dest="${rest_input:-$default_rest_dest}"
+        fi
+
         mkdir -p "$(dirname "$oss_dest")" "$rest_dest"
         disk_check_path="$(dirname "$oss_dest")"
     else
-        echo
-        read -p "Download directory [${default_download}]: " download_input
-        local download_base="${download_input:-$default_download}"
+        local download_base
+        if [[ -n "$DOWNLOAD_BASE" ]]; then
+            download_base="$DOWNLOAD_BASE"
+        elif [[ -n "$NON_INTERACTIVE" ]]; then
+            download_base="$default_download"
+        else
+            echo
+            read -p "Download directory [${default_download}]: " download_input
+            download_base="${download_input:-$default_download}"
+        fi
         download_dir_path="${download_base}/${kb_version}"
         mkdir -p "$download_base"
         disk_check_path="$download_base"
@@ -518,16 +622,24 @@ kb_download() {
                     echo "(Note: for full KB the 'oss' folder and the remaining files may end up on different"
                     echo " filesystems. The check above is against ${disk_check_path}.)"
                 fi
-                log "Insufficient disk space for ${kb_version}: need ${remote_hr}, have ${local_hr} (user confirm)"
-                while true; do
-                    read -p "Continue download anyway? [y/N] " yn
-                    yn="${yn:-n}"
-                    case $yn in
-                        [Yy]*) echo "Continuing despite low disk space."; break ;;
-                        [Nn]*) echo "Aborting download."; return ;;
-                        *)     echo "Please answer yes (y) or no (n)." ;;
-                    esac
-                done
+                log "Insufficient disk space for ${kb_version}: need ${remote_hr}, have ${local_hr}"
+                if [[ -n "$NON_INTERACTIVE" ]]; then
+                    if [[ -n "$FORCE_DISK" ]]; then
+                        echo "Continuing despite low disk space (-f)."
+                    else
+                        die "Aborting download: low disk space. Re-run with -f to override."
+                    fi
+                else
+                    while true; do
+                        read -p "Continue download anyway? [y/N] " yn
+                        yn="${yn:-n}"
+                        case $yn in
+                            [Yy]*) echo "Continuing despite low disk space."; break ;;
+                            [Nn]*) echo "Aborting download."; return ;;
+                            *)     echo "Please answer yes (y) or no (n)." ;;
+                        esac
+                    done
+                fi
             else
                 echo "Disk space OK."
             fi
@@ -536,13 +648,13 @@ kb_download() {
         echo "WARN: metadata.json not found on server, skipping disk space check."
     fi
 
-    # Prompt for thread count if using lftp
-    if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
+    # Prompt for thread count if using lftp (skipped under -y)
+    if [[ "$DOWNLOAD_TOOL" == "lftp" && -z "$NON_INTERACTIVE" ]]; then
         read -p "lftp parallel threads [${LFTP_THREADS}]: " threads_input
         LFTP_THREADS="${threads_input:-$LFTP_THREADS}"
     fi
 
-    # Download
+    # Final confirmation (skipped under -y)
     echo
     local prompt_dest
     if [[ "$mode" == "full" ]]; then
@@ -550,44 +662,39 @@ kb_download() {
     else
         prompt_dest="${download_dir_path}"
     fi
-    while true; do
-        read -p "Download ${label} ${kb_version} to ${prompt_dest}? [Y/n] " yn
-        yn="${yn:-y}"
-        case $yn in
-            [Yy]*)
-                log "Starting download of ${label} ${kb_version}"
+    if [[ -z "$NON_INTERACTIVE" ]]; then
+        while true; do
+            read -p "Download ${label} ${kb_version} to ${prompt_dest}? [Y/n] " yn
+            yn="${yn:-y}"
+            case $yn in
+                [Yy]*) break ;;
+                [Nn]*) echo "Skipping download."; return ;;
+                *)     echo "Please answer yes (y) or no (n)." ;;
+            esac
+        done
+    fi
 
-                if [[ "$mode" == "full" ]]; then
-                    download_full_kb "${remote_path}/${kb_version}" "$oss_dest" "$rest_dest"
-                    echo
-                    echo "Full KB downloaded:"
-                    echo "  oss folder:  ${oss_dest}"
-                    echo "  other files: ${rest_dest}"
-                    log "Full KB ${kb_version} downloaded: oss=${oss_dest}, rest=${rest_dest}"
-                    echo
-                    echo "Finished downloading full KB."
-                else
-                    download_dir "${remote_path}/${kb_version}" "$download_dir_path"
-                    echo
-                    echo "${label^} downloaded to ${download_dir_path}"
-                    log "${label^} downloaded to ${download_dir_path}"
-                    echo
-                    echo "Finished downloading update."
-                    echo "Please run the ldb-import.sh script provided inside the update folder to import into the KB:"
-                    echo "  ${download_dir_path}/ldb-import.sh"
-                fi
+    log "Starting download of ${label} ${kb_version}"
 
-                break
-                ;;
-            [Nn]*)
-                echo "Skipping download."
-                return
-                ;;
-            *)
-                echo "Please answer yes (y) or no (n)."
-                ;;
-        esac
-    done
+    if [[ "$mode" == "full" ]]; then
+        download_full_kb "${remote_path}/${kb_version}" "$oss_dest" "$rest_dest"
+        echo
+        echo "Full KB downloaded:"
+        echo "  oss folder:  ${oss_dest}"
+        echo "  other files: ${rest_dest}"
+        log "Full KB ${kb_version} downloaded: oss=${oss_dest}, rest=${rest_dest}"
+        echo
+        echo "Finished downloading full KB."
+    else
+        download_dir "${remote_path}/${kb_version}" "$download_dir_path"
+        echo
+        echo "${label^} downloaded to ${download_dir_path}"
+        log "${label^} downloaded to ${download_dir_path}"
+        echo
+        echo "Finished downloading update."
+        echo "Please run the ldb-import.sh script provided inside the update folder to import into the KB:"
+        echo "  ${download_dir_path}/ldb-import.sh"
+    fi
 }
 
 # ---------------------------------------------------------------------------
