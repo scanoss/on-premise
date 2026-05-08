@@ -133,7 +133,7 @@ The **test KB** is a small, pre-built LDB used to verify that your installation 
 
 #### KB Download Prerequisites
 
-- **lftp** (recommended): provides parallel, resumable downloads (`apt install lftp`). If lftp is not installed, the script will offer to continue with the standard `sftp` client
+- **lftp** (recommended): provides parallel, resumable downloads (`apt install lftp`). If lftp is not installed, the script will offer to continue with the standard `sftp` client (when run with `-y` it falls back to `sftp` automatically)
 - **sshpass** (only if using sftp fallback): required to pass the password non-interactively (`apt install sshpass`). Not needed when using lftp.
 - **SFTP credentials**: provided by the SCANOSS sales team (host, port, username, password)
 
@@ -153,11 +153,13 @@ Run the script without arguments for a fully interactive session:
 
 #### Command-line Options
 
-All connection details and the download mode can be passed as arguments to skip the interactive prompts:
+All connection details, paths, and the download mode can be passed as arguments to skip the matching interactive prompt:
 
 ```bash
 ./kb-download.sh -m update -h sftp.test.xyz -P 12345 -u USER21 -p mypassword
 ```
+
+**Connection / mode**
 
 | Flag | Description |
 |------|-------------|
@@ -168,9 +170,44 @@ All connection details and the download mode can be passed as arguments to skip 
 | `-p` | SFTP password |
 | `-t` | lftp parallel download threads (default: 25) |
 | `-d` | Force download tool: `lftp` or `sftp` |
+
+**Path / version overrides**
+
+| Flag | Description |
+|------|-------------|
+| `-V` | KB version (full/update mode); default: latest from `LATEST.txt` on the server |
+| `-o` | Destination path. Test mode: test-KB destination. Full mode: `oss` folder destination. (default: `/var/lib/ldb/oss`) |
+| `-r` | Full mode only: destination for non-oss items (default: `/tmp/scanoss_kb_full_<version>`) |
+| `-D` | Update mode only: download base directory (default: `/tmp/scanoss_kb_update`; final path is `<D>/<version>`) |
+
+**Non-interactive flags**
+
+| Flag | Description |
+|------|-------------|
+| `-y` | Don't prompt; use defaults for unspecified values and auto-confirm the download. Required values (`-m`, `-h`, `-P`, `-u`, `-p`) must be supplied — the script exits with an error if any are missing. |
+| `-f` | Force download even if free disk space is below the required size. Only meaningful with `-y`; without `-y` you are prompted to confirm. |
 | `-?` | Show help |
 
-Any options not provided on the command line will be prompted interactively.
+Any options not provided on the command line will be prompted interactively, unless `-y` is set.
+
+##### Non-interactive Examples
+
+```bash
+# Defaults (latest version, /var/lib/ldb/oss + /tmp/scanoss_kb_full_<version>):
+./kb-download.sh -y -m full -h sftp.test.xyz -P 12345 -u USER21 -p mypassword
+
+# Pin a version, custom paths, force on low disk space:
+./kb-download.sh -y -f -m full -V 26.03 \
+    -o /data/oss -r /data/kb-rest \
+    -h sftp.test.xyz -P 12345 -u USER21 -p mypassword
+
+# Update mode with a custom download base directory:
+./kb-download.sh -y -m update -D /opt/scanoss/updates \
+    -h sftp.test.xyz -P 12345 -u USER21 -p mypassword
+
+# Test KB:
+./kb-download.sh -y -m test -h sftp.test.xyz -P 12345 -u USER21 -p mypassword
+```
 
 #### How it Works
 
