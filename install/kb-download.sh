@@ -5,8 +5,9 @@ set -e
 ###############################################################################
 # SCANOSS Knowledge Base Download Script
 #
-# Downloads the full KB, a KB update, or the test KB from the SCANOSS SFTP
-# server. Supports both lftp (parallel, resumable) and sftp fallback.
+# Downloads the full KB, a KB update, the test KB, or a SQLite KB snapshot
+# from the SCANOSS SFTP server. Supports both lftp (parallel, resumable) and
+# sftp fallback.
 #
 # Usage:
 #   kb-download.sh [-m mode] [-h host] [-P port] [-u user] [-p password]
@@ -26,8 +27,9 @@ SFTP_PORT=""
 REMOTE_PATH_FULL="kb/full"
 REMOTE_PATH_UPDATE="kb/update"
 REMOTE_PATH_TEST="kb/test/oss"
+REMOTE_PATH_SQLITE="kb/sqlite"
 
-MODE=""            # "full", "update", or "test"
+MODE=""            # "full", "update", "test", or "sqlite"
 DOWNLOAD_TOOL=""   # set during init: "lftp" or "sftp"
 SFTP_USER=""
 SFTP_PASS=""
@@ -65,7 +67,7 @@ usage() {
     echo "          [-D path] [-y] [-f]"
     echo
     echo "Connection / mode options:"
-    echo "  -m    Download mode: full, update, or test"
+    echo "  -m    Download mode: full, update, test, or sqlite"
     echo "  -h    SFTP host"
     echo "  -P    SFTP port"
     echo "  -u    SFTP username"
@@ -74,14 +76,15 @@ usage() {
     echo "  -d    Download tool: lftp or sftp"
     echo
     echo "Path / version overrides (skip the matching interactive prompt):"
-    echo "  -V    KB version (full/update mode); default: latest from LATEST.txt"
+    echo "  -V    KB version (full/update/sqlite mode); default: latest from LATEST.txt"
     echo "  -o    Destination path:"
     echo "          test mode -> test-KB destination (default: /var/lib/ldb/oss)"
     echo "          full mode -> 'oss' folder destination (default: /var/lib/ldb/oss)"
     echo "  -r    full mode: destination for non-oss items"
     echo "        (default: /tmp/scanoss_kb_full_<version>)"
-    echo "  -D    update mode: download base directory"
-    echo "        (default: /tmp/scanoss_kb_update; final path is <D>/<version>)"
+    echo "  -D    update/sqlite mode: download base directory"
+    echo "        (default: /tmp/scanoss_kb_update for update, cwd for sqlite;"
+    echo "         final path is <D>/<version>)"
     echo
     echo "Non-interactive flags:"
     echo "  -y    Don't prompt; use defaults for unspecified values, auto-confirm"
@@ -298,14 +301,14 @@ init_download_tool() {
 prompt_missing_mode() {
     if [[ -n "$MODE" ]]; then
         case "$MODE" in
-            full|update|test) ;;
-            *) die "Invalid mode: ${MODE}. Use 'full', 'update', or 'test'." ;;
+            full|update|test|sqlite) ;;
+            *) die "Invalid mode: ${MODE}. Use 'full', 'update', 'test', or 'sqlite'." ;;
         esac
         return
     fi
 
     if [[ -n "$NON_INTERACTIVE" ]]; then
-        die "Mode is required in non-interactive mode. Pass -m full|update|test."
+        die "Mode is required in non-interactive mode. Pass -m full|update|test|sqlite."
     fi
 
     echo
@@ -313,14 +316,16 @@ prompt_missing_mode() {
     echo "  1) Full KB"
     echo "  2) KB update"
     echo "  3) Test KB"
+    echo "  4) SQLite KB"
     echo
     while true; do
-        read -p "Select [1-3]: " choice
+        read -p "Select [1-4]: " choice
         case $choice in
             1) MODE="full"; break ;;
             2) MODE="update"; break ;;
             3) MODE="test"; break ;;
-            *) echo "Please enter 1, 2, or 3." ;;
+            4) MODE="sqlite"; break ;;
+            *) echo "Please enter 1, 2, 3, or 4." ;;
         esac
     done
 }
@@ -459,15 +464,23 @@ kb_download() {
     local mode="$1"
     local remote_path label default_download
 
-    if [[ "$mode" == "full" ]]; then
-        remote_path="$REMOTE_PATH_FULL"
-        label="full KB"
-        default_download="/tmp/scanoss_kb_full"
-    else
-        remote_path="$REMOTE_PATH_UPDATE"
-        label="update"
-        default_download="/tmp/scanoss_kb_update"
-    fi
+    case "$mode" in
+        full)
+            remote_path="$REMOTE_PATH_FULL"
+            label="full KB"
+            default_download="/tmp/scanoss_kb_full"
+            ;;
+        update)
+            remote_path="$REMOTE_PATH_UPDATE"
+            label="update"
+            default_download="/tmp/scanoss_kb_update"
+            ;;
+        sqlite)
+            remote_path="$REMOTE_PATH_SQLITE"
+            label="sqlite KB"
+            default_download="."
+            ;;
+    esac
 
     # Discover available versions
     echo
@@ -691,9 +704,13 @@ kb_download() {
         echo "${label^} downloaded to ${download_dir_path}"
         log "${label^} downloaded to ${download_dir_path}"
         echo
-        echo "Finished downloading update."
-        echo "Please run the ldb-import.sh script provided inside the update folder to import into the KB:"
-        echo "  ${download_dir_path}/ldb-import.sh"
+        if [[ "$mode" == "update" ]]; then
+            echo "Finished downloading update."
+            echo "Please run the ldb-import.sh script provided inside the update folder to import into the KB:"
+            echo "  ${download_dir_path}/ldb-import.sh"
+        else
+            echo "Finished downloading ${label}."
+        fi
     fi
 }
 
