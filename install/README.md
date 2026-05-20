@@ -35,7 +35,7 @@
 2. Add execution permissions to the installation scripts: ```cd on-premise/install/ && chmod +x *.sh```
 3. Run the install-scanoss.sh script: ```sudo ./install-scanoss.sh```
 4. Choose option 1) Install everything
-5. Run the kb-download.sh script: ```./kb-download.sh``` and choose what to download (full KB, an update, or the test KB)
+5. Run the kb-download.sh script: ```./kb-download.sh``` and choose what to download (full KB, an update, the test KB, or a SQLite KB snapshot). If you downloaded a KB update, run the `ldb-import.sh` script included in the download folder to import it into your local LDB.
 6. Installation finished!
 
 ## Introduction
@@ -77,7 +77,7 @@ The following is recommended for running the SCANOSS Applications and SCANOSS Te
 ## Repository Contents
 
 - [install-scanoss.sh](./install-scanoss.sh): bash script for installing SCANOSS (SFTP user setup creation, dependencies installation and application download/install)
-- [kb-download.sh](./kb-download.sh): bash script for downloading the full KB, KB updates, or the test KB from the SCANOSS SFTP server
+- [kb-download.sh](./kb-download.sh): bash script for downloading the full KB, KB updates, the test KB, or a SQLite KB snapshot from the SCANOSS SFTP server. KB update downloads ship with an `ldb-import.sh` helper that imports the update into your local LDB.
 - [test.sh](./test.sh): bash script for verifying the correct installation of SCANOSS and the SCANOSS KB
 - [resources](/resources): directory containing files for testing the installation of SCANOSS and the SCANOSS KB
 - [config.sh](./config.sh): configuration file
@@ -244,8 +244,9 @@ What do you want to download?
   1) Full KB
   2) KB update
   3) Test KB
+  4) SQLite KB
 
-Select [1-3]: 2
+Select [1-4]: 2
 
 SFTP host: sftp.test.xyz
 SFTP port: 12345
@@ -355,6 +356,47 @@ Test KB downloaded to /var/lib/ldb/oss
 
 Finished downloading test KB.
 ```
+
+##### SQLite KB
+
+```
+./kb-download.sh -m sqlite -h sftp.test.xyz -P 12345 -u USER21
+
+SCANOSS Knowledge Base Download
+================================
+Using lftp for downloads (parallel, resumable).
+
+SFTP password:
+
+Fetching available sqlite KB versions...
+
+Available sqlite KB versions:
+-------------------
+  1) 26.04  (latest)
+-------------------
+
+Select a sqlite KB version to download [1-1] (default: 1):
+
+Selected sqlite KB: 26.04
+
+Download directory [.]:
+
+Fetching sqlite KB metadata...
+Sqlite KB size: 1.2G
+Free space:  500G (on /dev/sda1)
+Disk space OK.
+
+lftp parallel threads [25]:
+
+Download sqlite KB 26.04 to ./26.04? [Y/n]
+Downloading kb/sqlite/26.04 with lftp (25 parallel threads, resumable)...
+
+Sqlite KB downloaded to ./26.04
+
+Finished downloading sqlite KB.
+```
+
+The downloaded folder contains all `.sqlite` files the SFTP user has access to (plus `metadata.json`). Different users may see different sets of files depending on their permissions.
 
 #### Verifying a KB Update
 
