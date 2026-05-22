@@ -1,445 +1,383 @@
 #!/bin/bash
+set -e
 
-set -e # Exit immediately if a command exits with a non-zero status.
+# Import configuration
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/config.sh"
 
-# Import configuration file
-source ./config.sh
+# ─── OS Detection ───────────────────────────────────────────────────────────
 
-function detect_os_type() {
+detect_os() {
     if [ -f /etc/debian_version ]; then
         echo "Debian"
     elif [ -f /etc/redhat-release ] || [ -f /etc/centos-release ]; then
         echo "CentOS"
     else
-        echo "This operating system is not supported, refer to the document provided with this script for more details (page X)"
+        echo "Unsupported OS. Supported: Debian 11/12/13, CentOS/RHEL."
         exit 1
     fi
 }
 
-function install_dependencies {
-  log "Installing system dependencies..."
-  
-  # Define the list of dependencies to install
-  packages=(
-      gzip
-      tar
-      unzip
-      ruby
-      curl
-      lftp
-      jq
-      wget
-      sshpass
-  ) 
+# ─── User & Directory Setup ─────────────────────────────────────────────────
 
-  deb_packages=(
-      coreutils
-      unrar-free
-      xz-utils
-      p7zip-full
-      libsodium23
-      libgcrypt20-dev
-  )
-
-  rpm_packages=(
-      coreutils-common
-      xz
-      openssh-clients
-  )
-
-  case "$OS" in
-    "Debian")
-        echo "Installing Debian dependencies."
-
-        # Install the packages
-        echo "Installing packages..."
-        apt update && apt install -y "${packages[@]}" "${deb_packages[@]}"
-        ;;
-    "CentOS")
-        echo "Installing CentOS dependencies."
-        
-        # Install dependencies
-        yum update -y 
-        dnf install -y openssl
-
-        # Install the packages
-        echo "Installing packages..."
-        yum install -y "${packages[@]}" "${rpm_packages[@]}"
-
-        # Install Libsodium
-        yum groupinstall 'Development Tools' -y
-
-        # Build Libsodium
-        curl -O https://download.libsodium.org/libsodium/releases/libsodium-1.0.18-stable.tar.gz
-        tar -xzvf libsodium-1.0.18-stable.tar.gz
-        cd libsodium-stable
-        ./configure
-        make && make check
-        make install
-        ;;
-    esac
+create_scanoss_user() {
+    if getent passwd "$RUNTIME_USER" > /dev/null 2>&1; then
+        log "User $RUNTIME_USER already exists."
+    else
+        log "Creating system user: $RUNTIME_USER"
+        useradd --system --shell /bin/false "$RUNTIME_USER"
+    fi
 }
 
-function setup_sftp {
-  # Ask for SFTP credentials
-  echo "Please enter your SFTP Credentials below"
-  read -p "Enter your username: " SCANOSS_SFTP_USER
-  read -s -p "Enter your password: " SCANOSS_SFTP_PASSWORD
-  echo ""
-
-  if [[ -z "$SCANOSS_SFTP_USER" || -z "$SCANOSS_SFTP_PASSWORD" ]]; then
-    echo "Error: username or password is empty."
-    exit 1
-  fi
-
-  echo SCANOSS_LOGIN="${SCANOSS_SFTP_USER}:${SCANOSS_SFTP_PASSWORD}" > ~/.scanoss_login
-  chmod 600 ~/.scanoss_login
-  
-  echo "$SCANOSS_SFTP_USER" > ~/.ssh_user
-  chmod 600 ~/.ssh_user
-
-  echo "$SCANOSS_SFTP_PASSWORD" > ~/.sshpass
-  chmod 600 ~/.sshpass
-
-  echo "ls" | sshpass -f ~/.sshpass sftp -o "StrictHostKeyChecking=no" -P 49322  "$SCANOSS_SFTP_USER"@sftp.scanoss.com 
-
-  echo "Connection succesful!"
-
+create_directories() {
+    log "Creating directories..."
+    mkdir -p "$APP_DIR" "$LDB_LOCATION" "/var/log/$APP_NAME" "/usr/local/etc/$APP_NAME"
+    chown -R "$RUNTIME_USER:$RUNTIME_USER" "/var/log/$APP_NAME" "/usr/local/etc/$APP_NAME"
 }
 
-function download_application {
-  log "Downloading Application to $APP_DIR..."
-  # Add commands to install application here
-  read -p "Download SCANOSS Application files (y/abort) [abort]? " -n 1 -r
-  echo
-  if [[ $REPLY =~ ^[Yy]$ ]] ; then
-    echo "Setting up application download..."
-  else
-    echo "Stopping."
-    exit 1
-  fi
+# ─── Dependencies ───────────────────────────────────────────────────────────
 
-  read -p "Enter the installation directory location (default: $APP_DIR): " DOWNLOAD_LOCATION
-  APP_DIR=${DOWNLOAD_LOCATION:-$APP_DIR}
+install_dependencies() {
+    log "Installing system dependencies..."
 
-  echo "Select the source for the installation of SCANOSS Application files:"
+    local common_packages=(gzip tar unzip curl lftp jq wget)
 
-  select download_source in "SCANOSS (LFTP)" "Other"
-  do
-    case $download_source in 
-        "SCANOSS (LFTP)")
-
-            lftp -u "$(cat ~/.ssh_user)":"$(cat ~/.sshpass)" -e "mirror -c -e -P 10  /binaries/ $APP_DIR; exit" sftp://sftp.scanoss.com:49322
-
-            break
-    ;;
-        "Other")
-
-            echo "Refer to the document provided with this script (section X)"
-        
-            break
-    ;;
-
-    esac
-  done
-}
-
-function install_application {
-  log "Installing $APP_NAME to $APP_DIR..."
-  # Add commands to install application here
-
-  install_application_dependencies() {
-        log "Installing application dependencies"
-
-        local dependency_package_path="$APP_DIR/app_dependencies/"
-        if [ $OS = "CentOS" ]; then
-            if dnf list installed | grep -q "libsodium"; then
-                log "libsodium is already installed via package manager"
-            else
-                tar -xzvf "$dependency_package_path/centos/libsodium"*"tar.gz"
-                cd "$dependency_package_path/centos/libsodium-stable"
-                ./configure
-                make && make check
-                make install
-                dnf -y install "$APP_DIR/dependencies/libsodium/"* 
+    case "$OS" in
+        Debian)
+            # Detect libsodium package name (varies by Debian version)
+            local libsodium_pkg="libsodium23"
+            local deb_version
+            deb_version=$(cat /etc/debian_version | cut -d. -f1)
+            if [[ "$deb_version" -ge 13 ]]; then
+                libsodium_pkg="libsodium26"
             fi
-        fi
-        
-        log "Finished installing dependencies"
 
-        echo "Finished installing dependencies"
-    
-    }
+            local deb_packages=(coreutils unrar-free xz-utils p7zip-full "$libsodium_pkg" libgcrypt20-dev)
 
-  installDpkg() {
-      local component=$1
+            apt-get update -qq
+            apt-get install -y -qq "${common_packages[@]}" "${deb_packages[@]}"
+            ;;
+        CentOS)
+            local rpm_packages=(coreutils-common xz openssh-clients openssl)
 
-      ret=$?
-      if [ $ret -ne 0 ] ; then
-          echo "Failed to find an installation package for $component in $APP_DIR"
-          return 1
-      fi
+            dnf install -y "${common_packages[@]}" "${rpm_packages[@]}"
 
-      log "Installing SCANOSS $component"
-
-      # Special case, the engine package is called 'scanoss'
-      local package_path="$APP_DIR/$component/$VERSION/$component_*_amd64.deb"
-      if [ $component = "engine" ]; then
-          package_path="$APP_DIR/$component/$VERSION/scanoss_*_amd64.deb"
-      fi
-      echo $package_path
-
-      dpkg -i $package_path
-  }
-
-  installRpm() {
-      local component=$1
-
-      ret=$?
-      if [ $ret -ne 0 ] ; then
-          echo "Failed to find an installation package for $component in $APP_DIR"
-          return 1
-      fi
-
-      log "Installing SCANOSS $component"
-
-      # Special case, the engine package is called 'scanoss'
-      local package_path="$APP_DIR/$component/$VERSION/scanoss*.rpm"
-      if [ $component = "engine" ]; then
-          package_path="$APP_DIR/$component/$VERSION/scanoss*.rpm"
-      fi
-      echo $package_path
-      
-      dnf -y install "$package_path"
-  }
-
-  # Install API
-
-  installApi(){
-
-    local tar_file_path="$APP_DIR/api/$VERSION/scanoss-go_linux-amd64_*.tgz"
-
-    echo 'Extracting ' $tar_file_path
-    mkdir -p $APP_DIR/tmp
-    tar -xzvf $tar_file_path -C "$APP_DIR/tmp/"
-
-    log "Installing SCANOSS API"
-    
-    chmod +x $APP_DIR/tmp/scripts/env-setup.sh
-    (cd $APP_DIR/tmp/scripts ; ./env-setup.sh )
-
-  }
-
-  installEncoderLib() {
-
-    log 'Installing SCANOSS Encoder Library'
-    # Find the tar.gz file in the version directory
-    local tar_file=$(find "$APP_DIR/scanoss-encoder/$VERSION" -maxdepth 1 -name "*.tar.gz" | head -n 1)
-    
-    if [ -n "$tar_file" ]; then
-        log "Found tar.gz file: $tar_file. Extracting..."
-        tar -xzf "$tar_file" -C "$APP_DIR/scanoss-encoder/$VERSION"
-    else
-        log "No tar.gz file found."
-    fi
-    
-    # Copy the library file to the appropriate location
-    if [ -f "$APP_DIR/scanoss-encoder/$VERSION/libscanoss_encoder.so" ]; then
-        cp "$APP_DIR/scanoss-encoder/$VERSION/libscanoss_encoder.so" /usr/lib/libscanoss_encoder.so
-        ldconfig
-        echo "scanoss-encoder installed succesfully!"
-    else
-        log "Library file libscanoss_encoder.so not found."
-        echo "libscanoss_encoder.so not found."
-    fi
-  }
-
-  correctOwnership() {
-
-    log 'Updating ownership for SCANOSS applications and directories'
-    chown -R $RUNTIME_USER:$RUNTIME_USER /var/log/$APP_NAME
-    chown -R $RUNTIME_USER:$RUNTIME_USER /usr/local/etc/$APP_NAME
-    chown -R $RUNTIME_USER:$RUNTIME_USER /bin/scanoss
-    chown -R $RUNTIME_USER:$RUNTIME_USER /bin/ldb
-    chown -R $RUNTIME_USER:$RUNTIME_USER /usr/lib/libscanoss_encoder.so
-
-  }
-
-  case "$OS" in
-    "Debian")
-    select application in "Install all applications and dependencies" "Install dependencies" "engine" "ldb" "API" "encoder" "Quit"
-        do
-            case $application in 
-                "Install all applications and dependencies")
-                    install_application_dependencies
-                    installDpkg "engine"
-                    installDpkg "ldb"
-                    installApi
-                    installEncoderLib
-                    correctOwnership
-                    ;;
-                "Install dependencies")
-                    install_application_dependencies 
-                    ;;
-                "engine")
-                    installDpkg "engine"
-                    ;;
-                "ldb")
-                    installDpkg "ldb"
-                    ;;
-                "API")
-                    installApi
-                    ;;
-                "scanoss-encoder")
-                    installEncoderLib
-                    ;;
-                "Quit")
-                    echo "Exiting..."
-                    break
-                    ;;
-                *)
-                    echo "Invalid option"
-                    ;;
-            esac
-        done
-    ;;
-    "CentOS")
-      select application in "Install all applications and dependencies" "Install dependencies" "engine" "ldb" "API" "scanoss-encoder" "Quit"
-        do
-            case $application in 
-                "Install all applications and application dependencies")
-                    install_application_dependencies
-                    installRpm "engine"
-                    installRpm "ldb"
-                    installApi
-                    installEncoderLib
-                    correctOwnership
-                    ;;
-                "Install dependencies")
-                    install_application_dependencies 
-                    ;;
-                "engine")
-                    installRpm "engine"
-                    ;;
-                "ldb")
-                    installRpm "ldb"
-                    ;;
-                "API")
-                    installApi
-                    ;;
-                "scanoss-encoder")
-                    installEncoderLib
-                    ;;
-                "Quit")
-                    echo "Exiting..."
-                    break
-                    ;;
-                *)
-                    echo "Invalid option"
-                    ;;
-            esac
-        done
-      ;;
+            # Build libsodium from source if not installed
+            if ! ldconfig -p | grep -q libsodium; then
+                log "Building libsodium from source..."
+                dnf groupinstall -y 'Development Tools'
+                local tmpdir
+                tmpdir=$(mktemp -d)
+                curl -sL -o "$tmpdir/libsodium.tar.gz" \
+                    https://download.libsodium.org/libsodium/releases/libsodium-1.0.20-stable.tar.gz
+                tar -xzf "$tmpdir/libsodium.tar.gz" -C "$tmpdir"
+                (cd "$tmpdir/libsodium-stable" && ./configure && make -j"$(nproc)" && make install)
+                ldconfig
+                rm -rf "$tmpdir"
+            fi
+            ;;
     esac
 
+    log "Dependencies installed."
 }
 
-function create_scanoss_user {
+# ─── SFTP Setup ─────────────────────────────────────────────────────────────
 
-    # Makes sure the scanoss user exists
-    if ! getent passwd $RUNTIME_USER > /dev/null ; then
-    echo "Runtime user does not exist: $RUNTIME_USER"
-    read -p "Do you want to create the user $RUNTIME_USER (y/abort) [abort]? " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]] ; then
-        case "$OS" in
-            "Debian")
-            useradd --system $RUNTIME_USER
-            ;;
-            "CentOS")
-            adduser --system $RUNTIME_USER
-            ;;
-            esac
-        
-        echo "User $RUNTIME_USER created successfully"
-    else
-        echo "Stopping."
+setup_sftp() {
+    echo ""
+    echo "SFTP Credentials"
+    echo "──────────────────"
+
+    read -rp "SFTP host [$SFTP_HOST]: " input_host
+    SFTP_HOST="${input_host:-$SFTP_HOST}"
+
+    read -rp "SFTP port [$SFTP_PORT]: " input_port
+    SFTP_PORT="${input_port:-$SFTP_PORT}"
+
+    read -rp "SFTP username: " SFTP_USER
+    read -rsp "SFTP password: " SFTP_PASSWORD
+    echo ""
+
+    if [[ -z "$SFTP_USER" || -z "$SFTP_PASSWORD" ]]; then
+        echo "Error: username and password are required."
         exit 1
     fi
 
-fi
+    # Test connection
+    echo "Testing connection..."
+    if echo "ls" | lftp -u "$SFTP_USER","$SFTP_PASSWORD" -p "$SFTP_PORT" "sftp://$SFTP_HOST" 2>/dev/null; then
+        echo "Connection successful."
+    else
+        echo "Error: Could not connect to SFTP server."
+        exit 1
+    fi
+
+    # Save credentials for later use
+    echo "SFTP_USER=$SFTP_USER" > ~/.scanoss_sftp
+    echo "SFTP_PASSWORD=$SFTP_PASSWORD" >> ~/.scanoss_sftp
+    echo "SFTP_HOST=$SFTP_HOST" >> ~/.scanoss_sftp
+    echo "SFTP_PORT=$SFTP_PORT" >> ~/.scanoss_sftp
+    chmod 600 ~/.scanoss_sftp
+
+    log "SFTP credentials saved to ~/.scanoss_sftp"
 }
 
-function create_ldb_directory {
-    if [ ! -d "$LDB_LOCATION" ]; then
-        echo "Creating LDB directory: $LDB_LOCATION"
-        mkdir -p "$LDB_LOCATION"
+load_sftp_creds() {
+    if [[ -f ~/.scanoss_sftp ]]; then
+        source ~/.scanoss_sftp
     else
-        echo "LDB directory already exists: $LDB_LOCATION"
+        echo "No saved SFTP credentials found. Run 'Setup SFTP Credentials' first."
+        return 1
     fi
 }
 
-# Main script
-echo "Starting $APP_NAME installation script..."
-log "Starting $APP_NAME installation script..."
+# ─── Download ───────────────────────────────────────────────────────────────
 
-# Make sure we're running as root
-if [ "$(id -u)" != "0" ]; then
-  echo "This script must be run as root."
-  exit 1
+download_component() {
+    local component="$1"
+    local version="$2"
+
+    load_sftp_creds || return 1
+
+    local remote_path="/binaries/$component/$version"
+    local local_path="$APP_DIR/$component/$version"
+
+    echo "Downloading $component ($version) from SFTP..."
+    mkdir -p "$local_path"
+
+    lftp -u "$SFTP_USER","$SFTP_PASSWORD" -p "$SFTP_PORT" "sftp://$SFTP_HOST" -e \
+        "mirror -c -P 5 $remote_path $local_path; exit" 2>/dev/null
+
+    if [[ -d "$local_path" ]] && ls "$local_path"/* &>/dev/null; then
+        log "Downloaded $component $version to $local_path"
+        echo "$component $version downloaded successfully."
+    else
+        echo "Error: Download of $component $version failed or directory is empty."
+        return 1
+    fi
+}
+
+download_all() {
+    echo ""
+    echo "Downloading SCANOSS components"
+    echo "──────────────────────────────"
+    echo "Versions: engine=$ENGINE_VERSION, ldb=$LDB_VERSION, api=$API_VERSION, encoder=$ENCODER_VERSION"
+    echo ""
+
+    download_component "engine" "$ENGINE_VERSION"
+    download_component "ldb" "$LDB_VERSION"
+    download_component "api" "$API_VERSION"
+    download_component "scanoss-encoder" "$ENCODER_VERSION"
+}
+
+# ─── Install ────────────────────────────────────────────────────────────────
+
+install_engine() {
+    local version="${ENGINE_VERSION}"
+    local pkg_dir="$APP_DIR/engine/$version"
+
+    case "$OS" in
+        Debian)
+            local deb
+            deb=$(find "$pkg_dir" -name "scanoss_*_amd64.deb" | head -1)
+            if [[ -z "$deb" ]]; then
+                echo "Error: No engine .deb package found in $pkg_dir"
+                return 1
+            fi
+            log "Installing engine from $deb"
+            dpkg -i "$deb"
+            ;;
+        CentOS)
+            local rpm
+            rpm=$(find "$pkg_dir" -name "scanoss*.rpm" | head -1)
+            if [[ -z "$rpm" ]]; then
+                echo "Error: No engine .rpm package found in $pkg_dir"
+                return 1
+            fi
+            log "Installing engine from $rpm"
+            dnf -y install "$rpm"
+            ;;
+    esac
+}
+
+install_ldb() {
+    local version="${LDB_VERSION}"
+    local pkg_dir="$APP_DIR/ldb/$version"
+
+    case "$OS" in
+        Debian)
+            local deb
+            deb=$(find "$pkg_dir" -name "ldb_*_amd64.deb" | head -1)
+            if [[ -z "$deb" ]]; then
+                echo "Error: No ldb .deb package found in $pkg_dir"
+                return 1
+            fi
+            log "Installing ldb from $deb"
+            dpkg -i "$deb"
+            ;;
+        CentOS)
+            local rpm
+            rpm=$(find "$pkg_dir" -name "ldb*.rpm" | head -1)
+            if [[ -z "$rpm" ]]; then
+                echo "Error: No ldb .rpm package found in $pkg_dir"
+                return 1
+            fi
+            log "Installing ldb from $rpm"
+            dnf -y install "$rpm"
+            ;;
+    esac
+}
+
+install_api() {
+    local version="${API_VERSION}"
+    local pkg_dir="$APP_DIR/api/$version"
+
+    local tgz
+    tgz=$(find "$pkg_dir" -name "scanoss-go_linux-amd64_*.tgz" -o -name "scanoss-go-api_*.tgz" | head -1)
+    if [[ -z "$tgz" ]]; then
+        echo "Error: No API .tgz package found in $pkg_dir"
+        return 1
+    fi
+
+    log "Installing API from $tgz"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    tar -xzf "$tgz" -C "$tmpdir"
+
+    if [[ -x "$tmpdir/scripts/env-setup.sh" ]]; then
+        (cd "$tmpdir/scripts" && ./env-setup.sh)
+    else
+        echo "Error: env-setup.sh not found in the API package."
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    rm -rf "$tmpdir"
+}
+
+install_encoder() {
+    local version="${ENCODER_VERSION}"
+    local pkg_dir="$APP_DIR/scanoss-encoder/$version"
+
+    local tgz
+    tgz=$(find "$pkg_dir" -maxdepth 1 -name "*.tar.gz" | head -1)
+    if [[ -n "$tgz" ]]; then
+        log "Extracting encoder from $tgz"
+        tar -xzf "$tgz" -C "$pkg_dir"
+    fi
+
+    if [[ -f "$pkg_dir/libscanoss_encoder.so" ]]; then
+        cp "$pkg_dir/libscanoss_encoder.so" /usr/lib/libscanoss_encoder.so
+        ldconfig
+        log "scanoss-encoder installed."
+    else
+        echo "Warning: libscanoss_encoder.so not found in $pkg_dir"
+        return 1
+    fi
+}
+
+fix_ownership() {
+    log "Setting ownership for SCANOSS directories..."
+    chown -R "$RUNTIME_USER:$RUNTIME_USER" "/var/log/$APP_NAME" 2>/dev/null || true
+    chown -R "$RUNTIME_USER:$RUNTIME_USER" "/usr/local/etc/$APP_NAME" 2>/dev/null || true
+    [[ -d /bin/scanoss ]] && chown -R "$RUNTIME_USER:$RUNTIME_USER" /bin/scanoss
+    [[ -d /bin/ldb ]] && chown -R "$RUNTIME_USER:$RUNTIME_USER" /bin/ldb
+    [[ -f /usr/lib/libscanoss_encoder.so ]] && chown "$RUNTIME_USER:$RUNTIME_USER" /usr/lib/libscanoss_encoder.so
+}
+
+install_all() {
+    echo ""
+    echo "Installing all SCANOSS components"
+    echo "──────────────────────────────────"
+    install_engine
+    install_ldb
+    install_api
+    install_encoder
+    fix_ownership
+    echo ""
+    echo "All components installed. Run the test script to verify:"
+    echo "  ./test.sh"
+}
+
+install_select() {
+    echo ""
+    echo "Select component to install:"
+    select app in "All components" "engine" "ldb" "API" "encoder" "Back"; do
+        case "$app" in
+            "All components") install_all; break ;;
+            "engine") install_engine; break ;;
+            "ldb") install_ldb; break ;;
+            "API") install_api; break ;;
+            "encoder") install_encoder; break ;;
+            "Back") break ;;
+            *) echo "Invalid option." ;;
+        esac
+    done
+}
+
+# ─── Version Selection ──────────────────────────────────────────────────────
+
+select_versions() {
+    echo ""
+    echo "Current versions: engine=$ENGINE_VERSION, ldb=$LDB_VERSION, api=$API_VERSION, encoder=$ENCODER_VERSION"
+    echo "(\"latest\" uses the most recent release on SFTP)"
+    echo ""
+    read -rp "Engine version [$ENGINE_VERSION]: " v
+    ENGINE_VERSION="${v:-$ENGINE_VERSION}"
+    read -rp "LDB version [$LDB_VERSION]: " v
+    LDB_VERSION="${v:-$LDB_VERSION}"
+    read -rp "API version [$API_VERSION]: " v
+    API_VERSION="${v:-$API_VERSION}"
+    read -rp "Encoder version [$ENCODER_VERSION]: " v
+    ENCODER_VERSION="${v:-$ENCODER_VERSION}"
+    echo "Versions set: engine=$ENGINE_VERSION, ldb=$LDB_VERSION, api=$API_VERSION, encoder=$ENCODER_VERSION"
+}
+
+# ─── Main ───────────────────────────────────────────────────────────────────
+
+echo ""
+echo "SCANOSS On-Premise Installer"
+echo "════════════════════════════"
+echo ""
+
+if [[ "$(id -u)" != "0" ]]; then
+    echo "This script must be run as root."
+    exit 1
 fi
 
-# Make sure the application directory exists, otherwise it creates it
-if [ ! -d "$APP_DIR" ]; then
-    echo "Creating application directory: $APP_DIR"
-    mkdir -p "$APP_DIR"
-fi
+OS=$(detect_os)
+log "Detected OS: $OS"
 
-# Detect operating system automatically
-OS=$(detect_os_type)
+mkdir -p "$APP_DIR"
 
 while true; do
-    echo
-    echo "SCANOSS Installation Menu"
-    echo "------------------------"
-    echo "1) Install everything"
-    echo "2) Install Dependencies"
-    echo "3) Setup SFTP Credentials"
-    echo "4) Download Application"
-    echo "5) Install Application"
-    echo "6) Quit"
-    echo
-    read -p "Enter your choice [1-6]: " choice
+    echo ""
+    echo "Installation Menu"
+    echo "─────────────────"
+    echo "1) Install everything (dependencies + download + install)"
+    echo "2) Install system dependencies only"
+    echo "3) Setup SFTP credentials"
+    echo "4) Download components from SFTP"
+    echo "5) Install components (from already downloaded files)"
+    echo "6) Select versions (current: engine=$ENGINE_VERSION, ldb=$LDB_VERSION, api=$API_VERSION)"
+    echo "7) Quit"
+    echo ""
+    read -rp "Enter your choice [1-7]: " choice
 
-    case $choice in
+    case "$choice" in
         1)
             create_scanoss_user
-            create_ldb_directory
+            create_directories
             install_dependencies
             setup_sftp
-            download_application
-            install_application
+            download_all
+            install_all
             ;;
-        2)
-            install_dependencies
-            ;;    
-        3)
-            setup_sftp
-            ;;
-        4)
-            download_application
-            ;;
-        5)
-            create_scanoss_user
-            create_ldb_directory
-            install_application
-            ;;
-        6)
-            echo "Exiting script..."
-            exit 0
-            ;;
-        *)
-            echo "Invalid option. Please enter a number between 1-4."
-            ;;
+        2) install_dependencies ;;
+        3) setup_sftp ;;
+        4) download_all ;;
+        5) install_select ;;
+        6) select_versions ;;
+        7) echo "Exiting."; exit 0 ;;
+        *) echo "Invalid option." ;;
     esac
 done
