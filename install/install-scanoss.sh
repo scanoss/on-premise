@@ -1,5 +1,6 @@
 #!/bin/bash
-set -e
+# Don't use set -e: we handle errors per function to avoid killing the whole
+# interactive menu when a single component fails.
 
 # Import configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,12 +45,12 @@ install_dependencies() {
 
     case "$OS" in
         Debian)
-            # Detect libsodium package name (varies by Debian version)
-            local libsodium_pkg="libsodium23"
-            local deb_version
-            deb_version=$(cat /etc/debian_version | cut -d. -f1)
-            if [[ "$deb_version" -ge 13 ]]; then
-                libsodium_pkg="libsodium26"
+            # Detect libsodium package name from available packages
+            local libsodium_pkg
+            libsodium_pkg=$(apt-cache search '^libsodium[0-9]' 2>/dev/null | awk '{print $1}' | head -1)
+            if [[ -z "$libsodium_pkg" ]]; then
+                libsodium_pkg="libsodium23"
+                log "Warning: could not detect libsodium package, falling back to $libsodium_pkg"
             fi
 
             local deb_packages=(coreutils unrar-free xz-utils p7zip-full "$libsodium_pkg" libgcrypt20-dev)
@@ -84,6 +85,12 @@ install_dependencies() {
 # ─── SFTP Setup ─────────────────────────────────────────────────────────────
 
 setup_sftp() {
+    # Check lftp is installed
+    if ! command -v lftp &>/dev/null; then
+        echo "Error: lftp is not installed. Run option 2 (Install dependencies) first."
+        return 1
+    fi
+
     echo ""
     echo "SFTP Credentials"
     echo "──────────────────"
@@ -105,7 +112,7 @@ setup_sftp() {
 
     # Test connection
     echo "Testing connection..."
-    if echo "ls" | lftp -u "$SFTP_USER","$SFTP_PASSWORD" -p "$SFTP_PORT" "sftp://$SFTP_HOST" 2>/dev/null; then
+    if lftp -u "$SFTP_USER","$SFTP_PASSWORD" -p "$SFTP_PORT" "sftp://$SFTP_HOST" -e "set sftp:auto-confirm yes; ls; exit" &>/dev/null; then
         echo "Connection successful."
     else
         echo "Error: Could not connect to SFTP server."
@@ -137,6 +144,11 @@ download_component() {
     local component="$1"
     local version="$2"
 
+    if ! command -v lftp &>/dev/null; then
+        echo "Error: lftp is not installed. Run option 2 (Install dependencies) first."
+        return 1
+    fi
+
     load_sftp_creds || return 1
 
     local remote_path="/binaries/$component/$version"
@@ -146,7 +158,7 @@ download_component() {
     mkdir -p "$local_path"
 
     lftp -u "$SFTP_USER","$SFTP_PASSWORD" -p "$SFTP_PORT" "sftp://$SFTP_HOST" -e \
-        "mirror -c -P 5 $remote_path $local_path; exit" 2>/dev/null
+        "set sftp:auto-confirm yes; mirror -c -P 5 $remote_path $local_path; exit" 2>/dev/null
 
     if [[ -d "$local_path" ]] && ls "$local_path"/* &>/dev/null; then
         log "Downloaded $component $version to $local_path"
@@ -288,6 +300,8 @@ install_all() {
     echo ""
     echo "Installing all SCANOSS components"
     echo "──────────────────────────────────"
+    create_scanoss_user
+    create_directories
     install_engine
     install_ldb
     install_api
