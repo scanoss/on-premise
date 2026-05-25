@@ -256,7 +256,8 @@ install_api() {
     tmpdir=$(mktemp -d)
     tar -xzf "$tgz" -C "$tmpdir"
 
-    if [[ -x "$tmpdir/scripts/env-setup.sh" ]]; then
+    if [[ -f "$tmpdir/scripts/env-setup.sh" ]]; then
+        chmod +x "$tmpdir/scripts/env-setup.sh"
         (cd "$tmpdir/scripts" && ./env-setup.sh)
     else
         echo "Error: env-setup.sh not found in the API package."
@@ -296,6 +297,78 @@ fix_ownership() {
     [[ -f /usr/lib/libscanoss_encoder.so ]] && chown "$RUNTIME_USER:$RUNTIME_USER" /usr/lib/libscanoss_encoder.so
 }
 
+# ─── Decoration Services ────────────────────────────────────────────────────
+
+DECORATION_SERVICES=(dependencies components vulnerabilities cryptography geoprovenance licenses folder-hashing-api)
+
+install_decoration_service() {
+    local service="$1"
+    local version="latest"
+    local pkg_dir="$APP_DIR/$service/$version"
+
+    local tgz
+    tgz=$(find "$pkg_dir" -name "scanoss-${service}-api_linux-amd64_*.tgz" -o -name "scanoss-${service}_linux-amd64_*.tgz" 2>/dev/null | head -1)
+    if [[ -z "$tgz" ]]; then
+        echo "Error: No .tgz package found for $service in $pkg_dir"
+        echo "  Run 'Download components from SFTP' first."
+        return 1
+    fi
+
+    log "Installing $service from $tgz"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    tar -xzf "$tgz" -C "$tmpdir"
+
+    if [[ -f "$tmpdir/scripts/env-setup.sh" ]]; then
+        chmod +x "$tmpdir/scripts/env-setup.sh"
+        (cd "$tmpdir/scripts" && ./env-setup.sh)
+    else
+        echo "Error: env-setup.sh not found in the $service package."
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    rm -rf "$tmpdir"
+}
+
+download_decoration_services() {
+    if ! command -v lftp &>/dev/null; then
+        echo "Error: lftp is not installed. Run option 2 (Install dependencies) first."
+        return 1
+    fi
+    load_sftp_creds || return 1
+
+    echo ""
+    echo "Downloading decoration services"
+    echo "────────────────────────────────"
+    for svc in "${DECORATION_SERVICES[@]}"; do
+        download_component "$svc" "latest"
+    done
+}
+
+install_decoration_select() {
+    echo ""
+    echo "Select decoration service to install:"
+    select svc in "All decoration services" "${DECORATION_SERVICES[@]}" "Back"; do
+        case "$svc" in
+            "All decoration services")
+                for s in "${DECORATION_SERVICES[@]}"; do
+                    install_decoration_service "$s"
+                done
+                break
+                ;;
+            "Back") break ;;
+            *)
+                if [[ -n "$svc" ]]; then
+                    install_decoration_service "$svc"
+                    break
+                else
+                    echo "Invalid option."
+                fi
+                ;;
+        esac
+    done
+}
+
 install_all() {
     echo ""
     echo "Installing all SCANOSS components"
@@ -308,16 +381,18 @@ install_all() {
     install_encoder
     fix_ownership
     echo ""
-    echo "All components installed. Run the test script to verify:"
+    echo "All core components installed. Run the test script to verify:"
     echo "  ./test.sh"
+    echo ""
+    echo "To install decoration services, use menu option 8."
 }
 
 install_select() {
     echo ""
     echo "Select component to install:"
-    select app in "All components" "engine" "ldb" "API" "encoder" "Back"; do
+    select app in "All core components" "engine" "ldb" "API" "encoder" "Back"; do
         case "$app" in
-            "All components") install_all; break ;;
+            "All core components") install_all; break ;;
             "engine") install_engine; break ;;
             "ldb") install_ldb; break ;;
             "API") install_api; break ;;
@@ -367,15 +442,17 @@ while true; do
     echo ""
     echo "Installation Menu"
     echo "─────────────────"
-    echo "1) Install everything (dependencies + download + install)"
+    echo "1) Install everything (dependencies + download + install core)"
     echo "2) Install system dependencies only"
     echo "3) Setup SFTP credentials"
-    echo "4) Download components from SFTP"
-    echo "5) Install components (from already downloaded files)"
+    echo "4) Download core components from SFTP"
+    echo "5) Install core components (from already downloaded files)"
     echo "6) Select versions (current: engine=$ENGINE_VERSION, ldb=$LDB_VERSION, api=$API_VERSION)"
-    echo "7) Quit"
+    echo "7) Download decoration services from SFTP"
+    echo "8) Install decoration services"
+    echo "9) Quit"
     echo ""
-    read -rp "Enter your choice [1-7]: " choice
+    read -rp "Enter your choice [1-9]: " choice
 
     case "$choice" in
         1)
@@ -391,7 +468,9 @@ while true; do
         4) download_all ;;
         5) install_select ;;
         6) select_versions ;;
-        7) echo "Exiting."; exit 0 ;;
+        7) download_decoration_services ;;
+        8) install_decoration_select ;;
+        9) echo "Exiting."; exit 0 ;;
         *) echo "Invalid option." ;;
     esac
 done
