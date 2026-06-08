@@ -140,24 +140,57 @@ init_mode_settings() {
     fi
 }
 
+# Format a duration in seconds as a compact string (e.g. "45s", "2m31s", "1h23m").
+format_duration() {
+    local s="$1"
+    if (( s >= 3600 )); then
+        printf "%dh%02dm" $(( s / 3600 )) $(( (s % 3600) / 60 ))
+    elif (( s >= 60 )); then
+        printf "%dm%02ds" $(( s / 60 )) $(( s % 60 ))
+    else
+        printf "%ds" "$s"
+    fi
+}
+
 # Background progress poller for sftp downloads. lftp prints its own per-file
 # progress; sftp does not show an aggregate. Polls $dest size against
-# $REMOTE_SIZE_BYTES every 3s and rewrites a single \r-terminated line.
+# $REMOTE_SIZE_BYTES every 3s and rewrites a single \r-terminated line with
+# bytes / total / pct, average rate (since download start), elapsed, and ETA.
 progress_monitor() {
     local dest="$1" expected="$2"
+    # $SECONDS resets to 0 in this background subshell, so it tracks elapsed
+    # time since the download started rather than since script start.
     while sleep 3; do
         [[ -d "$dest" ]] || continue
         local current
         current=$(du -sb "$dest" 2>/dev/null | awk '{print $1}')
         [[ -z "$current" || "$current" -eq 0 ]] && continue
+        local elapsed=$SECONDS
+        (( elapsed < 1 )) && elapsed=1
+        local rate=$(( current / elapsed ))
+        local rate_hr="$(numfmt --to=iec "$rate")/s"
+        local elapsed_hr="$(format_duration "$elapsed")"
         if [[ -n "$expected" && "$expected" -gt 0 ]]; then
             local pct=$(( current * 100 / expected ))
-            printf "\r  progress: %s / %s (%d%%)   " \
+            local remaining=$(( expected - current ))
+            local eta_hr="?"
+            if (( remaining <= 0 )); then
+                eta_hr="0s"
+            elif (( rate > 0 )); then
+                eta_hr="$(format_duration $(( remaining / rate )))"
+            fi
+            printf "\r  progress: %s / %s (%d%%)  %s  elapsed %s  ETA %s   " \
                 "$(numfmt --to=iec "$current")" \
                 "$(numfmt --to=iec "$expected")" \
-                "$pct"
+                "$pct" \
+                "$rate_hr" \
+                "$elapsed_hr" \
+                "$eta_hr"
         else
-            printf "\r  progress: %s   " "$(numfmt --to=iec "$current")"
+            printf "\r  progress: %s  %s  elapsed %s   " \
+                "$(numfmt --to=iec "$current")" \
+                "$rate_hr" \
+                "$elapsed_hr"
         fi
     done
 }
