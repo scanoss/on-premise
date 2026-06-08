@@ -46,15 +46,16 @@ OSS_DEST=""          # test-mode destination, or full-mode 'oss' destination
 REST_DEST=""         # full-mode destination for non-oss items
 DOWNLOAD_BASE=""     # update-mode download base directory
 FORCE_DISK=""        # continue download when free space < required size
+COMPRESS=""          # enable SSH transport compression (-C)
 
 # Set by the disk-space check; consumed by the sftp progress poller. Stays
 # empty if metadata.json is missing or has no total_size_bytes field.
 REMOTE_SIZE_BYTES=""
 
-# Mode-aware SSH transport compression. Populated by init_mode_settings() and
-# spliced into every sftp / lftp invocation. Currently enabled only for sqlite
-# mode (sqlite payloads compress well; the multi-TB full/update payloads do
-# not benefit and would bottleneck on the per-thread zlib worker).
+# SSH transport compression. Populated by init_compression_settings() when
+# -C is given, and spliced into every sftp / lftp invocation. Off by default
+# because zlib overhead exceeds the bandwidth saving on fast links carrying
+# already-dense payloads (hashes, indexes); useful for slow links.
 SSH_COMPRESS_FLAGS=""
 LFTP_COMPRESS_SETTINGS=""
 
@@ -78,7 +79,7 @@ die() {
 usage() {
     echo "Usage: $0 [-m mode] [-h host] [-P port] [-u user] [-p password]"
     echo "          [-t threads] [-d tool] [-V version] [-o path] [-r path]"
-    echo "          [-D path] [-y] [-f]"
+    echo "          [-D path] [-y] [-f] [-C]"
     echo
     echo "Connection / mode options:"
     echo "  -m    Download mode: full, update, test, or sqlite"
@@ -88,6 +89,9 @@ usage() {
     echo "  -p    SFTP password"
     echo "  -t    lftp parallel threads (default: ${LFTP_THREADS})"
     echo "  -d    Download tool: lftp or sftp"
+    echo "  -C    Enable SSH transport compression for the download. Off by"
+    echo "        default; useful on slow links. May slow downloads down on"
+    echo "        fast links carrying already-dense data (hashes, indexes)."
     echo
     echo "Path / version overrides (skip the matching interactive prompt):"
     echo "  -V    KB version (full/update/sqlite mode); default: latest from LATEST.txt"
@@ -131,12 +135,12 @@ lftp_cmd() {
         "sftp://${SFTP_HOST}:${SFTP_PORT}" 2>/dev/null
 }
 
-# Mode-aware compression setup. Called after MODE is resolved.
-init_mode_settings() {
-    if [[ "$MODE" == "sqlite" ]]; then
+# Opt-in compression setup. Called after parse_args. No-op unless -C was given.
+init_compression_settings() {
+    if [[ -n "$COMPRESS" ]]; then
         SSH_COMPRESS_FLAGS="-oCompression=yes"
         LFTP_COMPRESS_SETTINGS='set sftp:connect-program "ssh -a -x -C";'
-        echo "SSH transport compression enabled (sqlite mode)."
+        echo "SSH transport compression enabled (-C)."
     fi
 }
 
@@ -324,7 +328,7 @@ download_full_kb() {
 # ---------------------------------------------------------------------------
 
 parse_args() {
-    while getopts "m:h:P:u:p:t:d:V:o:r:D:yf?" opt; do
+    while getopts "m:h:P:u:p:t:d:V:o:r:D:yfC?" opt; do
         case $opt in
             m) MODE="$OPTARG" ;;
             h) SFTP_HOST="$OPTARG" ;;
@@ -339,6 +343,7 @@ parse_args() {
             D) DOWNLOAD_BASE="$OPTARG" ;;
             y) NON_INTERACTIVE=1 ;;
             f) FORCE_DISK=1 ;;
+            C) COMPRESS=1 ;;
             ?) usage ;;
             *) usage ;;
         esac
@@ -829,7 +834,7 @@ log "Starting knowledge base download script..."
 init_download_tool
 [[ "$DOWNLOAD_TOOL" == "sftp" ]] && check_sshpass
 prompt_missing_mode
-init_mode_settings
+init_compression_settings
 prompt_missing_connection
 
 if [[ "$MODE" == "test" ]]; then
