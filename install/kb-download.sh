@@ -47,6 +47,20 @@ REST_DEST=""         # full-mode destination for non-oss items
 DOWNLOAD_BASE=""     # update-mode download base directory
 FORCE_DISK=""        # continue download when free space < required size
 
+# Set by the disk-space check; consumed by the sftp progress poller. Stays
+# empty if metadata.json is missing or has no total_size_bytes field.
+REMOTE_SIZE_BYTES=""
+
+# Mode-aware SSH transport compression. Populated by init_mode_settings() and
+# spliced into every sftp / lftp invocation. Currently enabled only for sqlite
+# mode (sqlite payloads compress well; the multi-TB full/update payloads do
+# not benefit and would bottleneck on the per-thread zlib worker).
+SSH_COMPRESS_FLAGS=""
+LFTP_COMPRESS_SETTINGS=""
+
+# PID of the background progress poller (only used for sftp downloads).
+PROGRESS_PID=""
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -105,7 +119,7 @@ LFTP_SETTINGS="set sftp:auto-confirm yes;"
 sftp_cmd() {
     local cmd="$1"
     sshpass -p "$SFTP_PASS" \
-        sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new \
+        sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SSH_COMPRESS_FLAGS \
         "$SFTP_USER@$SFTP_HOST" <<< "$cmd" 2>/dev/null
 }
 
@@ -113,8 +127,54 @@ sftp_cmd() {
 lftp_cmd() {
     local cmd="$1"
     lftp -u "$SFTP_USER","$SFTP_PASS" \
-        -e "${LFTP_SETTINGS} $cmd; exit" \
+        -e "${LFTP_COMPRESS_SETTINGS} ${LFTP_SETTINGS} $cmd; exit" \
         "sftp://${SFTP_HOST}:${SFTP_PORT}" 2>/dev/null
+}
+
+# Mode-aware compression setup. Called after MODE is resolved.
+init_mode_settings() {
+    if [[ "$MODE" == "sqlite" ]]; then
+        SSH_COMPRESS_FLAGS="-oCompression=yes"
+        LFTP_COMPRESS_SETTINGS='set sftp:connect-program "ssh -a -x -C";'
+        echo "SSH transport compression enabled (sqlite mode)."
+    fi
+}
+
+# Background progress poller for sftp downloads. lftp prints its own per-file
+# progress; sftp does not show an aggregate. Polls $dest size against
+# $REMOTE_SIZE_BYTES every 3s and rewrites a single \r-terminated line.
+progress_monitor() {
+    local dest="$1" expected="$2"
+    while sleep 3; do
+        [[ -d "$dest" ]] || continue
+        local current
+        current=$(du -sb "$dest" 2>/dev/null | awk '{print $1}')
+        [[ -z "$current" || "$current" -eq 0 ]] && continue
+        if [[ -n "$expected" && "$expected" -gt 0 ]]; then
+            local pct=$(( current * 100 / expected ))
+            printf "\r  progress: %s / %s (%d%%)   " \
+                "$(numfmt --to=iec "$current")" \
+                "$(numfmt --to=iec "$expected")" \
+                "$pct"
+        else
+            printf "\r  progress: %s   " "$(numfmt --to=iec "$current")"
+        fi
+    done
+}
+
+start_progress() {
+    local dest="$1"
+    [[ "$DOWNLOAD_TOOL" != "sftp" ]] && return
+    progress_monitor "$dest" "$REMOTE_SIZE_BYTES" &
+    PROGRESS_PID=$!
+}
+
+stop_progress() {
+    [[ -z "$PROGRESS_PID" ]] && return
+    kill "$PROGRESS_PID" 2>/dev/null || true
+    wait "$PROGRESS_PID" 2>/dev/null || true
+    PROGRESS_PID=""
+    echo  # finalize the \r line with a newline
 }
 
 # List directories under a remote path, returning just the names.
@@ -135,7 +195,7 @@ read_remote_file() {
     rm -f "$tmpfile"
     if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
         lftp -u "$SFTP_USER","$SFTP_PASS" \
-            -e "${LFTP_SETTINGS} get $remote_path -o $tmpfile; exit" \
+            -e "${LFTP_COMPRESS_SETTINGS} ${LFTP_SETTINGS} get $remote_path -o $tmpfile; exit" \
             "sftp://${SFTP_HOST}:${SFTP_PORT}" &>/dev/null
     else
         sftp_cmd "get $remote_path $tmpfile" >/dev/null 2>&1
@@ -165,7 +225,7 @@ download_path() {
         mkdir -p "$local_path"
         echo "Downloading ${remote_path} with lftp (${LFTP_THREADS} parallel threads, resumable)..."
         lftp -u "$SFTP_USER","$SFTP_PASS" \
-            -e "${LFTP_SETTINGS} mirror -c -P ${LFTP_THREADS} $remote_path $local_path; exit" \
+            -e "${LFTP_COMPRESS_SETTINGS} ${LFTP_SETTINGS} mirror -c -P ${LFTP_THREADS} $remote_path $local_path; exit" \
             "sftp://${SFTP_HOST}:${SFTP_PORT}"
     else
         echo "Downloading ${remote_path} with sftp..."
@@ -178,9 +238,13 @@ download_path() {
         local_base=$(basename "$local_path")
         mkdir -p "$parent_dir"
 
+        # Watch the in-flight directory ($parent_dir/$remote_base) since the
+        # final rename only happens after sftp returns.
+        start_progress "$parent_dir/$remote_base"
         sshpass -p "$SFTP_PASS" \
-            sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new \
+            sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SSH_COMPRESS_FLAGS \
             -r "$SFTP_USER@$SFTP_HOST:$remote_path" "$parent_dir"
+        stop_progress
 
         if [[ "$remote_base" != "$local_base" ]]; then
             rm -rf "$local_path"
@@ -390,6 +454,7 @@ kb_download_test() {
     if [[ -n "$metadata_content" ]]; then
         local remote_size
         remote_size=$(echo "$metadata_content" | grep -o '"total_size_bytes":[[:space:]]*[0-9]*' | grep -o '[0-9]*$')
+        REMOTE_SIZE_BYTES="$remote_size"
 
         if [[ -n "$remote_size" && "$remote_size" -gt 0 ]]; then
             local local_free
@@ -616,6 +681,7 @@ kb_download() {
     if [[ -n "$metadata_content" ]]; then
         local remote_size
         remote_size=$(echo "$metadata_content" | grep -o '"total_size_bytes":[[:space:]]*[0-9]*' | grep -o '[0-9]*$')
+        REMOTE_SIZE_BYTES="$remote_size"
 
         if [[ -n "$remote_size" && "$remote_size" -gt 0 ]]; then
             local local_free
@@ -720,6 +786,9 @@ kb_download() {
 
 parse_args "$@"
 
+# Make sure any background progress poller dies with the script.
+trap 'stop_progress' EXIT INT TERM
+
 echo "SCANOSS Knowledge Base Download"
 echo "================================"
 log "Starting knowledge base download script..."
@@ -727,6 +796,7 @@ log "Starting knowledge base download script..."
 init_download_tool
 [[ "$DOWNLOAD_TOOL" == "sftp" ]] && check_sshpass
 prompt_missing_mode
+init_mode_settings
 prompt_missing_connection
 
 if [[ "$MODE" == "test" ]]; then
