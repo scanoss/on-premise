@@ -9,11 +9,9 @@ set -e
 # from the SCANOSS SFTP server. Supports both lftp (parallel, resumable) and
 # sftp fallback.
 #
-# Usage:
-#   kb-download.sh [-m mode] [-h host] [-P port] [-u user] [-p password]
-#                  [-t threads] [-d tool]
-#
-# All options are optional. Any not provided will be prompted interactively.
+# Run with -? for the full list of CLI flags.
+# All options are optional; any not provided will be prompted interactively
+# (unless -y is passed, in which case missing required values are fatal).
 ###############################################################################
 
 # ---------------------------------------------------------------------------
@@ -290,11 +288,6 @@ download_path() {
     fi
 }
 
-# Download a remote directory to a local path (whole directory, single transfer).
-download_dir() {
-    download_path "$1" "$2"
-}
-
 # Download the full KB with split destinations:
 #   - the "oss" subfolder goes to oss_dest
 #   - everything else goes to rest_dest
@@ -345,7 +338,6 @@ parse_args() {
             f) FORCE_DISK=1 ;;
             C) COMPRESS=1 ;;
             ?) usage ;;
-            *) usage ;;
         esac
     done
 }
@@ -368,7 +360,8 @@ init_download_tool() {
         return
     fi
 
-    # Auto-detect: prefer lftp, fall back to sftp
+    # Auto-detect: prefer lftp; if missing, fall back to sftp automatically
+    # under -y, or ask the user otherwise.
     if command -v lftp &>/dev/null; then
         DOWNLOAD_TOOL="lftp"
         echo "Using lftp for downloads (parallel, resumable)."
@@ -491,7 +484,7 @@ kb_download_test() {
 
     if [[ -n "$metadata_content" ]]; then
         local remote_size
-        remote_size=$(echo "$metadata_content" | grep -o '"total_size_bytes":[[:space:]]*[0-9]*' | grep -o '[0-9]*$')
+        remote_size=$(echo "$metadata_content" | grep -oE '"total_size_bytes":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$')
         REMOTE_SIZE_BYTES="$remote_size"
 
         if [[ -n "$remote_size" && "$remote_size" -gt 0 ]]; then
@@ -718,7 +711,7 @@ kb_download() {
 
     if [[ -n "$metadata_content" ]]; then
         local remote_size
-        remote_size=$(echo "$metadata_content" | grep -o '"total_size_bytes":[[:space:]]*[0-9]*' | grep -o '[0-9]*$')
+        remote_size=$(echo "$metadata_content" | grep -oE '"total_size_bytes":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$')
         REMOTE_SIZE_BYTES="$remote_size"
 
         if [[ -n "$remote_size" && "$remote_size" -gt 0 ]]; then
@@ -803,7 +796,7 @@ kb_download() {
         echo
         echo "Finished downloading full KB."
     else
-        download_dir "${remote_path}/${kb_version}" "$download_dir_path"
+        download_path "${remote_path}/${kb_version}" "$download_dir_path"
         echo
         echo "${label^} downloaded to ${download_dir_path}"
         log "${label^} downloaded to ${download_dir_path}"
