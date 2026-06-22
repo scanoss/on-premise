@@ -212,13 +212,17 @@ stop_progress() {
     echo  # finalize the \r line with a newline
 }
 
-# List directories under a remote path, returning just the names.
+# List directories under a remote path, returning just the basenames.
+# Note: on SFTP servers that don't chroot, `ls -l <path>` prefixes each entry
+# with the path; the trailing `sed` normalizes the output to bare basenames.
+# `sed 's|.*/||'` is a no-op on already-bare names, so the chrooted case is
+# unaffected.
 list_remote_dirs() {
     local remote_path="$1"
     if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
         lftp_cmd "ls $remote_path" | awk '/^d/ {print $NF}' | grep -v '^\.\.*$' | sort
     else
-        sftp_cmd "ls -l $remote_path" | awk '/^d/ {print $NF}' | grep -v '^\.\.*$' | sort
+        sftp_cmd "ls -l $remote_path" | awk '/^d/ {print $NF}' | sed 's|.*/||' | grep -v '^\.\.*$' | sort
     fi
 }
 
@@ -239,13 +243,14 @@ read_remote_file() {
     rm -f "$tmpfile"
 }
 
-# List all top-level items (files and dirs) under a remote path.
+# List all top-level items (files and dirs) under a remote path. See
+# list_remote_dirs above for why the sftp branch needs the trailing sed.
 list_remote_items() {
     local remote_path="$1"
     if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
         lftp_cmd "ls $remote_path" | awk '/^[-dl]/ {print $NF}' | grep -v '^\.\.*$' | sort
     else
-        sftp_cmd "ls -l $remote_path" | awk '/^[-dl]/ {print $NF}' | grep -v '^\.\.*$' | sort
+        sftp_cmd "ls -l $remote_path" | awk '/^[-dl]/ {print $NF}' | sed 's|.*/||' | grep -v '^\.\.*$' | sort
     fi
 }
 
