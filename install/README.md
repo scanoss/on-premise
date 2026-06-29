@@ -35,7 +35,7 @@
 2. Add execution permissions to the installation scripts: ```cd on-premise/install/ && chmod +x *.sh```
 3. Run the install-scanoss.sh script: ```sudo ./install-scanoss.sh```
 4. Choose option 1) Install everything
-5. Run the kb-download.sh script: ```./kb-download.sh``` and choose what to download (full KB, an update, the test KB, or a SQLite KB snapshot). If you downloaded a KB update, run the `ldb-import.sh` script included in the download folder to import it into your local LDB.
+5. Run the kb-download.sh script: ```./kb-download.sh``` and choose what to download (full KB, an update, the test KB, a SQLite KB snapshot, or an HFH KB snapshot). If you downloaded a KB update, run the `ldb-import.sh` script included in the download folder to import it into your local LDB.
 6. Installation finished!
 
 ## Introduction
@@ -77,7 +77,7 @@ The following is recommended for running the SCANOSS Applications and SCANOSS Te
 ## Repository Contents
 
 - [install-scanoss.sh](./install-scanoss.sh): bash script for installing SCANOSS (SFTP user setup creation, dependencies installation and application download/install)
-- [kb-download.sh](./kb-download.sh): bash script for downloading the full KB, KB updates, the test KB, or a SQLite KB snapshot from the SCANOSS SFTP server. KB update downloads ship with an `ldb-import.sh` helper that imports the update into your local LDB.
+- [kb-download.sh](./kb-download.sh): bash script for downloading the full KB, KB updates, the test KB, a SQLite KB snapshot, or an HFH KB snapshot from the SCANOSS SFTP server. KB update downloads ship with an `ldb-import.sh` helper that imports the update into your local LDB.
 - [test.sh](./test.sh): bash script for verifying the correct installation of SCANOSS and the SCANOSS KB
 - [resources](/resources): directory containing files for testing the installation of SCANOSS and the SCANOSS KB
 - [config.sh](./config.sh): configuration file
@@ -121,7 +121,7 @@ After finishing the installation run ```sudo systemctl start scanoss-go-api.serv
 
 ### Knowledge Base Download (kb-download.sh)
 
-The `kb-download.sh` script provides a unified way to download the full KB, a KB update, the test KB, or a SQLite KB snapshot directly from the SCANOSS SFTP server. It connects to the server, lists all available versions, lets you choose which one to download, and checks for sufficient disk space before starting. For updates, a separate import script (`ldb-import.sh`) included in the downloaded folder handles importing into your local LDB.
+The `kb-download.sh` script provides a unified way to download the full KB, a KB update, the test KB, a SQLite KB snapshot, or an HFH KB snapshot directly from the SCANOSS SFTP server. It connects to the server, lists all available versions, lets you choose which one to download, and checks for sufficient disk space before starting. For updates, a separate import script (`ldb-import.sh`) included in the downloaded folder handles importing into your local LDB.
 
 The **test KB** is a small, pre-built LDB used to verify that your installation is working before loading the full production KB.
 
@@ -163,7 +163,7 @@ All connection details, paths, and the download mode can be passed as arguments 
 
 | Flag | Description |
 |------|-------------|
-| `-m` | Download mode: `full` (full KB), `update` (KB update), `test` (test KB), or `sqlite` (SQLite KB snapshot) |
+| `-m` | Download mode: `full` (full KB), `update` (KB update), `test` (test KB), `sqlite` (SQLite KB snapshot), or `hfh` (HFH KB snapshot) |
 | `-h` | SFTP host |
 | `-P` | SFTP port |
 | `-u` | SFTP username |
@@ -176,10 +176,10 @@ All connection details, paths, and the download mode can be passed as arguments 
 
 | Flag | Description |
 |------|-------------|
-| `-V` | KB version (full/update/sqlite mode); default: latest from `LATEST.txt` on the server |
+| `-V` | KB version (full/update/sqlite/hfh mode); default: latest from `LATEST.txt` on the server |
 | `-o` | Destination path. Test mode: test-KB destination. Full mode: `oss` folder destination. (default: `/var/lib/ldb/oss`) |
 | `-r` | Full mode only: destination for non-oss items (default: `/tmp/scanoss_kb_full_<version>`) |
-| `-D` | Update / sqlite mode: download base directory. Final path is `<D>/<version>`. Defaults: `/tmp/scanoss_kb_update` for update, current directory for sqlite |
+| `-D` | Update / sqlite / hfh mode: download base directory. Final path is `<D>/<version>` for update/sqlite and `<D>/<version>.zip` for hfh. Defaults: `/tmp/scanoss_kb_update` for update, current directory for sqlite and hfh |
 
 **Non-interactive flags**
 
@@ -214,6 +214,10 @@ Any options not provided on the command line will be prompted interactively, unl
 ./kb-download.sh -y -m sqlite -D /opt/scanoss/sqlite \
     -h sftp.test.xyz -P 12345 -u USER21 -p mypassword
 
+# HFH KB (single .zip; lands at ./<version>.zip):
+./kb-download.sh -y -m hfh \
+    -h sftp.test.xyz -P 12345 -u USER21 -p mypassword
+
 # Test KB:
 ./kb-download.sh -y -m test -h sftp.test.xyz -P 12345 -u USER21 -p mypassword
 ```
@@ -221,15 +225,16 @@ Any options not provided on the command line will be prompted interactively, unl
 #### How it Works
 
 1. **Connection**: the script prompts for (or reads from arguments) the SFTP host, port, username, and password
-2. **Mode selection**: you choose between downloading the full KB, a KB update, the test KB, or a SQLite KB snapshot
-3. **Version discovery** (full/update/sqlite only): it connects to the SFTP server and lists all available versions of the chosen type, marking which one is the latest. Test KB has no versions — there is only one current test KB on the server.
-4. **Selection** (full/update/sqlite only): you choose which version to download (defaults to the latest)
-5. **Disk space check**: the script fetches the metadata and verifies there is enough free disk space before downloading. If not enough is available, you are warned and asked to confirm before continuing.
+2. **Mode selection**: you choose between downloading the full KB, a KB update, the test KB, a SQLite KB snapshot, or an HFH KB snapshot
+3. **Version discovery** (full/update/sqlite/hfh only): it connects to the SFTP server and lists all available versions of the chosen type, marking which one is the latest. Test KB has no versions — there is only one current test KB on the server.
+4. **Selection** (full/update/sqlite/hfh only): you choose which version to download (defaults to the latest)
+5. **Disk space check**: the script fetches the metadata and verifies there is enough free disk space before downloading. If not enough is available, you are warned and asked to confirm before continuing. (For HFH the size comes from `ls -l` on the remote `.zip` rather than `metadata.json`.)
 6. **Download**:
    - **For full KB**: the download is split between two destinations. The `oss` folder (the main LDB data) goes to its own destination (default: `/var/lib/ldb/oss`), and all remaining files and folders go to a separate directory (default: `/tmp/scanoss_kb_full_<version>`). Both destinations can be changed when prompted.
    - **For updates**: the whole update folder is downloaded to a single directory (default: `/tmp/scanoss_kb_update/<version>`).
    - **For test KB**: the test KB's `oss` folder is downloaded to a single destination (default: `/var/lib/ldb/oss`). This will populate your LDB with the test data for verification.
    - **For SQLite KB**: the whole version folder is downloaded to `<base>/<version>` (default base: the current working directory). The folder contains one or more `.sqlite` files plus a `metadata.json`. The script downloads every file you have access to in that folder — different users may see different sets of `.sqlite` files depending on their SFTP permissions.
+   - **For HFH KB**: a single `<version>.zip` archive is downloaded to `<base>/<version>.zip` (default base: the current working directory). With lftp the file is fetched in parallel chunks (`pget -n <threads>`); with sftp it's a single-stream `get` with the live progress poller. The script does not extract the archive — leave that to your downstream tooling.
 7. **Import (updates only)**: after downloading an update, run the `ldb-import.sh` script included in the downloaded folder
 
 #### Example Sessions
@@ -246,8 +251,9 @@ What do you want to download?
   2) KB update
   3) Test KB
   4) SQLite KB
+  5) HFH KB
 
-Select [1-4]: 2
+Select [1-5]: 2
 
 SFTP host: sftp.test.xyz
 SFTP port: 12345
@@ -398,6 +404,47 @@ Finished downloading sqlite KB.
 ```
 
 The downloaded folder contains all `.sqlite` files the SFTP user has access to (plus `metadata.json`). Different users may see different sets of files depending on their permissions.
+
+##### HFH KB
+
+```
+./kb-download.sh -m hfh -h sftp.test.xyz -P 12345 -u USER21
+
+SCANOSS Knowledge Base Download
+================================
+Using lftp for downloads (parallel, resumable).
+
+SFTP password:
+
+Fetching available hfh KB versions...
+
+Available hfh KB versions:
+-------------------
+  1) 26.06  (latest)
+-------------------
+
+Select a hfh KB version to download [1-1] (default: 1):
+
+Selected hfh KB: 26.06
+
+Download directory [.]:
+
+Fetching hfh KB file size...
+Hfh KB size: 35G
+Free space:  1.7T (on /dev/sda1)
+Disk space OK.
+
+lftp parallel threads [25]:
+
+Download hfh KB 26.06 to ./26.06.zip? [Y/n]
+Downloading kb/hfh/26.06.zip with lftp (25 parallel chunks, resumable)...
+
+Hfh KB downloaded to ./26.06.zip
+
+Finished downloading hfh KB.
+```
+
+HFH ships as a single `<version>.zip` archive (no `metadata.json`); the disk-space check reads the file size from the remote `ls -l` output. The script does not extract the archive — that's left to downstream tooling.
 
 #### Verifying a KB Update
 

@@ -26,8 +26,9 @@ REMOTE_PATH_FULL="kb/full"
 REMOTE_PATH_UPDATE="kb/update"
 REMOTE_PATH_TEST="kb/test/oss"
 REMOTE_PATH_SQLITE="kb/sqlite"
+REMOTE_PATH_HFH="kb/hfh"
 
-MODE=""            # "full", "update", "test", or "sqlite"
+MODE=""            # "full", "update", "test", "sqlite", or "hfh"
 DOWNLOAD_TOOL=""   # set during init: "lftp" or "sftp"
 SFTP_USER=""
 SFTP_PASS=""
@@ -80,7 +81,7 @@ usage() {
     echo "          [-D path] [-y] [-f] [-C]"
     echo
     echo "Connection / mode options:"
-    echo "  -m    Download mode: full, update, test, or sqlite"
+    echo "  -m    Download mode: full, update, test, sqlite, or hfh"
     echo "  -h    SFTP host"
     echo "  -P    SFTP port"
     echo "  -u    SFTP username"
@@ -92,15 +93,15 @@ usage() {
     echo "        fast links carrying already-dense data (hashes, indexes)."
     echo
     echo "Path / version overrides (skip the matching interactive prompt):"
-    echo "  -V    KB version (full/update/sqlite mode); default: latest from LATEST.txt"
+    echo "  -V    KB version (full/update/sqlite/hfh mode); default: latest from LATEST.txt"
     echo "  -o    Destination path:"
     echo "          test mode -> test-KB destination (default: /var/lib/ldb/oss)"
     echo "          full mode -> 'oss' folder destination (default: /var/lib/ldb/oss)"
     echo "  -r    full mode: destination for non-oss items"
     echo "        (default: /tmp/scanoss_kb_full_<version>)"
-    echo "  -D    update/sqlite mode: download base directory"
-    echo "        (default: /tmp/scanoss_kb_update for update, cwd for sqlite;"
-    echo "         final path is <D>/<version>)"
+    echo "  -D    update/sqlite/hfh mode: download base directory"
+    echo "        (defaults: /tmp/scanoss_kb_update for update, cwd for sqlite and hfh."
+    echo "         Final path: <D>/<version> for update/sqlite, <D>/<version>.zip for hfh.)"
     echo
     echo "Non-interactive flags:"
     echo "  -y    Don't prompt; use defaults for unspecified values, auto-confirm"
@@ -163,7 +164,8 @@ progress_monitor() {
     # $SECONDS resets to 0 in this background subshell, so it tracks elapsed
     # time since the download started rather than since script start.
     while sleep 3; do
-        [[ -d "$dest" ]] || continue
+        # Accept either a directory or a single file (hfh mode downloads a .zip).
+        [[ -e "$dest" ]] || continue
         local current
         current=$(du -sb "$dest" 2>/dev/null | awk '{print $1}')
         [[ -z "$current" || "$current" -eq 0 ]] && continue
@@ -293,6 +295,43 @@ download_path() {
     fi
 }
 
+# Download a single remote file to a local file path (hfh mode). lftp uses
+# pget for parallel chunks of the same file; sftp uses a single-stream get.
+download_file() {
+    local remote_path="$1"
+    local local_path="$2"
+
+    mkdir -p "$(dirname "$local_path")"
+
+    if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
+        echo "Downloading ${remote_path} with lftp (${LFTP_THREADS} parallel chunks, resumable)..."
+        lftp -u "$SFTP_USER","$SFTP_PASS" \
+            -e "${LFTP_COMPRESS_SETTINGS} ${LFTP_SETTINGS} pget -c -n ${LFTP_THREADS} $remote_path -o $local_path; exit" \
+            "sftp://${SFTP_HOST}:${SFTP_PORT}"
+    else
+        echo "Downloading ${remote_path} with sftp..."
+        start_progress "$local_path"
+        sshpass -p "$SFTP_PASS" \
+            sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SSH_COMPRESS_FLAGS \
+            "$SFTP_USER@$SFTP_HOST:$remote_path" "$local_path"
+        stop_progress
+    fi
+}
+
+# Return the size in bytes of a single remote file. Used by hfh mode where
+# the KB ships a flat .zip with no metadata.json; the size comes from the
+# 5th column of an `ls -l`-style listing. Note: lftp's `ls -l <file>` is
+# server-passthrough and refuses a non-directory argument, so use `cls -l`
+# (lftp's own client-side listing) instead. Output is empty on failure.
+get_remote_file_size() {
+    local remote_path="$1"
+    if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
+        lftp_cmd "cls -l $remote_path" | awk '/^-/ {print $5; exit}'
+    else
+        sftp_cmd "ls -l $remote_path" | awk '/^-/ {print $5; exit}'
+    fi
+}
+
 # Download the full KB with split destinations:
 #   - the "oss" subfolder goes to oss_dest
 #   - everything else goes to rest_dest
@@ -401,14 +440,14 @@ init_download_tool() {
 prompt_missing_mode() {
     if [[ -n "$MODE" ]]; then
         case "$MODE" in
-            full|update|test|sqlite) ;;
-            *) die "Invalid mode: ${MODE}. Use 'full', 'update', 'test', or 'sqlite'." ;;
+            full|update|test|sqlite|hfh) ;;
+            *) die "Invalid mode: ${MODE}. Use 'full', 'update', 'test', 'sqlite', or 'hfh'." ;;
         esac
         return
     fi
 
     if [[ -n "$NON_INTERACTIVE" ]]; then
-        die "Mode is required in non-interactive mode. Pass -m full|update|test|sqlite."
+        die "Mode is required in non-interactive mode. Pass -m full|update|test|sqlite|hfh."
     fi
 
     echo
@@ -417,15 +456,17 @@ prompt_missing_mode() {
     echo "  2) KB update"
     echo "  3) Test KB"
     echo "  4) SQLite KB"
+    echo "  5) HFH KB"
     echo
     while true; do
-        read -p "Select [1-4]: " choice
+        read -p "Select [1-5]: " choice
         case $choice in
             1) MODE="full"; break ;;
             2) MODE="update"; break ;;
             3) MODE="test"; break ;;
             4) MODE="sqlite"; break ;;
-            *) echo "Please enter 1, 2, 3, or 4." ;;
+            5) MODE="hfh"; break ;;
+            *) echo "Please enter 1, 2, 3, 4, or 5." ;;
         esac
     done
 }
@@ -581,15 +622,25 @@ kb_download() {
             label="sqlite KB"
             default_download="."
             ;;
+        hfh)
+            remote_path="$REMOTE_PATH_HFH"
+            label="hfh KB"
+            default_download="."
+            ;;
     esac
 
-    # Discover available versions
+    # Discover available versions. hfh is a flat directory of <version>.zip
+    # files; other modes have versioned subdirectories.
     echo
     echo "Fetching available ${label} versions..."
     log "Fetching available ${label} versions from ${SFTP_HOST}:${remote_path}"
 
     local versions
-    versions=$(list_remote_dirs "$remote_path")
+    if [[ "$mode" == "hfh" ]]; then
+        versions=$(list_remote_items "$remote_path" | grep '\.zip$' | sed 's/\.zip$//' | sort)
+    else
+        versions=$(list_remote_dirs "$remote_path")
+    fi
 
     if [[ -z "$versions" ]]; then
         echo "No ${label} versions found on the server."
@@ -665,8 +716,9 @@ kb_download() {
     echo "Selected ${label}: $kb_version"
     log "Selected ${label} version: $kb_version"
 
-    # Download location(s)
-    local oss_dest="" rest_dest="" download_dir_path="" disk_check_path=""
+    # Download location(s). hfh produces a single .zip file at $hfh_local_file;
+    # other non-full modes produce a directory at $download_dir_path.
+    local oss_dest="" rest_dest="" download_dir_path="" hfh_local_file="" disk_check_path=""
     if [[ "$mode" == "full" ]]; then
         local default_oss_dest="/var/lib/ldb/oss"
         local default_rest_dest="/tmp/scanoss_kb_full_${kb_version}"
@@ -703,64 +755,78 @@ kb_download() {
             read -p "Download directory [${default_download}]: " download_input
             download_base="${download_input:-$default_download}"
         fi
-        download_dir_path="${download_base}/${kb_version}"
+        if [[ "$mode" == "hfh" ]]; then
+            hfh_local_file="${download_base}/${kb_version}.zip"
+        else
+            download_dir_path="${download_base}/${kb_version}"
+        fi
         mkdir -p "$download_base"
         disk_check_path="$download_base"
     fi
 
-    # Fetch metadata and check disk space
+    # Fetch metadata and check disk space. hfh has no metadata.json, so its
+    # size comes from `ls -l` on the remote .zip file instead.
     echo
-    echo "Fetching ${label} metadata..."
-    local metadata_content
-    metadata_content=$(read_remote_file "${remote_path}/${kb_version}/metadata.json" 2>/dev/null || true)
+    local remote_size=""
+    if [[ "$mode" == "hfh" ]]; then
+        echo "Fetching ${label} file size..."
+        remote_size=$(get_remote_file_size "${remote_path}/${kb_version}.zip" 2>/dev/null || true)
+    else
+        echo "Fetching ${label} metadata..."
+        local metadata_content
+        metadata_content=$(read_remote_file "${remote_path}/${kb_version}/metadata.json" 2>/dev/null || true)
+        if [[ -n "$metadata_content" ]]; then
+            remote_size=$(echo "$metadata_content" | grep -oE '"total_size_bytes":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$')
+        fi
+    fi
 
-    if [[ -n "$metadata_content" ]]; then
-        local remote_size
-        remote_size=$(echo "$metadata_content" | grep -oE '"total_size_bytes":[[:space:]]*[0-9]+' | grep -oE '[0-9]+$')
+    if [[ -n "$remote_size" && "$remote_size" -gt 0 ]]; then
         REMOTE_SIZE_BYTES="$remote_size"
 
-        if [[ -n "$remote_size" && "$remote_size" -gt 0 ]]; then
-            local local_free
-            local_free=$(df -B1 "$disk_check_path" | awk 'NR==2 {print $4}')
-            local remote_hr
-            remote_hr=$(numfmt --to=iec "$remote_size")
-            local local_hr
-            local_hr=$(numfmt --to=iec "$local_free")
+        local local_free
+        local_free=$(df -B1 "$disk_check_path" | awk 'NR==2 {print $4}')
+        local remote_hr
+        remote_hr=$(numfmt --to=iec "$remote_size")
+        local local_hr
+        local_hr=$(numfmt --to=iec "$local_free")
 
-            echo "${label^} size: ${remote_hr}"
-            echo "Free space:  ${local_hr} (on $(df "$disk_check_path" | awk 'NR==2 {print $1}'))"
+        echo "${label^} size: ${remote_hr}"
+        echo "Free space:  ${local_hr} (on $(df "$disk_check_path" | awk 'NR==2 {print $1}'))"
 
-            if (( local_free < remote_size )); then
-                echo
-                echo "WARNING: Not enough disk space. Need ${remote_hr} but only ${local_hr} available."
-                if [[ "$mode" == "full" ]]; then
-                    echo "(Note: for full KB the 'oss' folder and the remaining files may end up on different"
-                    echo " filesystems. The check above is against ${disk_check_path}.)"
-                fi
-                log "Insufficient disk space for ${kb_version}: need ${remote_hr}, have ${local_hr}"
-                if [[ -n "$NON_INTERACTIVE" ]]; then
-                    if [[ -n "$FORCE_DISK" ]]; then
-                        echo "Continuing despite low disk space (-f)."
-                    else
-                        die "Aborting download: low disk space. Re-run with -f to override."
-                    fi
+        if (( local_free < remote_size )); then
+            echo
+            echo "WARNING: Not enough disk space. Need ${remote_hr} but only ${local_hr} available."
+            if [[ "$mode" == "full" ]]; then
+                echo "(Note: for full KB the 'oss' folder and the remaining files may end up on different"
+                echo " filesystems. The check above is against ${disk_check_path}.)"
+            fi
+            log "Insufficient disk space for ${kb_version}: need ${remote_hr}, have ${local_hr}"
+            if [[ -n "$NON_INTERACTIVE" ]]; then
+                if [[ -n "$FORCE_DISK" ]]; then
+                    echo "Continuing despite low disk space (-f)."
                 else
-                    while true; do
-                        read -p "Continue download anyway? [y/N] " yn
-                        yn="${yn:-n}"
-                        case $yn in
-                            [Yy]*) echo "Continuing despite low disk space."; break ;;
-                            [Nn]*) echo "Aborting download."; return ;;
-                            *)     echo "Please answer yes (y) or no (n)." ;;
-                        esac
-                    done
+                    die "Aborting download: low disk space. Re-run with -f to override."
                 fi
             else
-                echo "Disk space OK."
+                while true; do
+                    read -p "Continue download anyway? [y/N] " yn
+                    yn="${yn:-n}"
+                    case $yn in
+                        [Yy]*) echo "Continuing despite low disk space."; break ;;
+                        [Nn]*) echo "Aborting download."; return ;;
+                        *)     echo "Please answer yes (y) or no (n)." ;;
+                    esac
+                done
             fi
+        else
+            echo "Disk space OK."
         fi
     else
-        echo "WARN: metadata.json not found on server, skipping disk space check."
+        if [[ "$mode" == "hfh" ]]; then
+            echo "WARN: could not determine remote file size, skipping disk space check."
+        else
+            echo "WARN: metadata.json not found on server, skipping disk space check."
+        fi
     fi
 
     # Prompt for thread count if using lftp (skipped under -y)
@@ -774,6 +840,8 @@ kb_download() {
     local prompt_dest
     if [[ "$mode" == "full" ]]; then
         prompt_dest="${oss_dest} + ${rest_dest}"
+    elif [[ "$mode" == "hfh" ]]; then
+        prompt_dest="${hfh_local_file}"
     else
         prompt_dest="${download_dir_path}"
     fi
@@ -800,6 +868,13 @@ kb_download() {
         log "Full KB ${kb_version} downloaded: oss=${oss_dest}, rest=${rest_dest}"
         echo
         echo "Finished downloading full KB."
+    elif [[ "$mode" == "hfh" ]]; then
+        download_file "${remote_path}/${kb_version}.zip" "$hfh_local_file"
+        echo
+        echo "${label^} downloaded to ${hfh_local_file}"
+        log "${label^} ${kb_version} downloaded to ${hfh_local_file}"
+        echo
+        echo "Finished downloading ${label}."
     else
         download_path "${remote_path}/${kb_version}" "$download_dir_path"
         echo
