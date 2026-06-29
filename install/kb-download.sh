@@ -222,9 +222,9 @@ stop_progress() {
 list_remote_dirs() {
     local remote_path="$1"
     if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
-        lftp_cmd "ls $remote_path" | awk '/^d/ {print $NF}' | grep -v '^\.\.*$' | sort
+        lftp_cmd "ls \"$remote_path\"" | awk '/^d/ {print $NF}' | grep -v '^\.\.*$' | sort
     else
-        sftp_cmd "ls -l $remote_path" | awk '/^d/ {print $NF}' | sed 's|.*/||' | grep -v '^\.\.*$' | sort
+        sftp_cmd "ls -l \"$remote_path\"" | awk '/^d/ {print $NF}' | sed 's|.*/||' | grep -v '^\.\.*$' | sort
     fi
 }
 
@@ -236,10 +236,10 @@ read_remote_file() {
     rm -f "$tmpfile"
     if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
         lftp -u "$SFTP_USER","$SFTP_PASS" \
-            -e "${LFTP_COMPRESS_SETTINGS} ${LFTP_SETTINGS} get $remote_path -o $tmpfile; exit" \
+            -e "${LFTP_COMPRESS_SETTINGS} ${LFTP_SETTINGS} get \"$remote_path\" -o \"$tmpfile\"; exit" \
             "sftp://${SFTP_HOST}:${SFTP_PORT}" &>/dev/null
     else
-        sftp_cmd "get $remote_path $tmpfile" >/dev/null 2>&1
+        sftp_cmd "get \"$remote_path\" \"$tmpfile\"" >/dev/null 2>&1
     fi
     cat "$tmpfile"
     rm -f "$tmpfile"
@@ -250,9 +250,9 @@ read_remote_file() {
 list_remote_items() {
     local remote_path="$1"
     if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
-        lftp_cmd "ls $remote_path" | awk '/^[-dl]/ {print $NF}' | grep -v '^\.\.*$' | sort
+        lftp_cmd "ls \"$remote_path\"" | awk '/^[-dl]/ {print $NF}' | grep -v '^\.\.*$' | sort
     else
-        sftp_cmd "ls -l $remote_path" | awk '/^[-dl]/ {print $NF}' | sed 's|.*/||' | grep -v '^\.\.*$' | sort
+        sftp_cmd "ls -l \"$remote_path\"" | awk '/^[-dl]/ {print $NF}' | sed 's|.*/||' | grep -v '^\.\.*$' | sort
     fi
 }
 
@@ -267,7 +267,7 @@ download_path() {
         mkdir -p "$local_path"
         echo "Downloading ${remote_path} with lftp (${LFTP_THREADS} parallel threads, resumable)..."
         lftp -u "$SFTP_USER","$SFTP_PASS" \
-            -e "${LFTP_COMPRESS_SETTINGS} ${LFTP_SETTINGS} mirror -c -P ${LFTP_THREADS} $remote_path $local_path; exit" \
+            -e "${LFTP_COMPRESS_SETTINGS} ${LFTP_SETTINGS} mirror -c -P ${LFTP_THREADS} \"$remote_path\" \"$local_path\"; exit" \
             "sftp://${SFTP_HOST}:${SFTP_PORT}"
     else
         echo "Downloading ${remote_path} with sftp..."
@@ -282,10 +282,14 @@ download_path() {
 
         # Watch the in-flight directory ($parent_dir/$remote_base) since the
         # final rename only happens after sftp returns.
+        # Run sftp from inside $parent_dir with `.` as the local arg:
+        # OpenSSH sftp's single-shot CLI re-splits the local arg on whitespace
+        # even when bash passes one quoted arg, so a $parent_dir containing
+        # spaces would silently land in the wrong directory.
         start_progress "$parent_dir/$remote_base"
-        sshpass -p "$SFTP_PASS" \
+        ( cd "$parent_dir" && sshpass -p "$SFTP_PASS" \
             sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SSH_COMPRESS_FLAGS \
-            -r "$SFTP_USER@$SFTP_HOST:$remote_path" "$parent_dir"
+            -r "$SFTP_USER@$SFTP_HOST:$remote_path" . )
         stop_progress
 
         if [[ "$remote_base" != "$local_base" ]]; then
@@ -306,14 +310,19 @@ download_file() {
     if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
         echo "Downloading ${remote_path} with lftp (${LFTP_THREADS} parallel chunks, resumable)..."
         lftp -u "$SFTP_USER","$SFTP_PASS" \
-            -e "${LFTP_COMPRESS_SETTINGS} ${LFTP_SETTINGS} pget -c -n ${LFTP_THREADS} $remote_path -o $local_path; exit" \
+            -e "${LFTP_COMPRESS_SETTINGS} ${LFTP_SETTINGS} pget -c -n ${LFTP_THREADS} \"$remote_path\" -o \"$local_path\"; exit" \
             "sftp://${SFTP_HOST}:${SFTP_PORT}"
     else
         echo "Downloading ${remote_path} with sftp..."
+        local local_dir local_base
+        local_dir=$(dirname "$local_path")
+        local_base=$(basename "$local_path")
+        # See download_path for why we cd first instead of passing $local_path
+        # directly: OpenSSH sftp's CLI re-splits the local arg on whitespace.
         start_progress "$local_path"
-        sshpass -p "$SFTP_PASS" \
+        ( cd "$local_dir" && sshpass -p "$SFTP_PASS" \
             sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SSH_COMPRESS_FLAGS \
-            "$SFTP_USER@$SFTP_HOST:$remote_path" "$local_path"
+            "$SFTP_USER@$SFTP_HOST:$remote_path" "$local_base" )
         stop_progress
     fi
 }
@@ -326,9 +335,9 @@ download_file() {
 get_remote_file_size() {
     local remote_path="$1"
     if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
-        lftp_cmd "cls -l $remote_path" | awk '/^-/ {print $5; exit}'
+        lftp_cmd "cls -l \"$remote_path\"" | awk '/^-/ {print $5; exit}'
     else
-        sftp_cmd "ls -l $remote_path" | awk '/^-/ {print $5; exit}'
+        sftp_cmd "ls -l \"$remote_path\"" | awk '/^-/ {print $5; exit}'
     fi
 }
 
