@@ -33,6 +33,8 @@ DOWNLOAD_TOOL=""   # set during init: "lftp" or "sftp"
 SFTP_USER=""
 SFTP_PASS=""
 LFTP_THREADS="25"
+CONNECT_TIMEOUT="15"   # seconds; connect timeout for the pre-flight check and
+                       # every sftp/lftp connection. Override with -w.
 
 # Non-interactive mode and per-prompt overrides.
 # When NON_INTERACTIVE is set the script never reads from stdin: missing
@@ -77,8 +79,8 @@ die() {
 
 usage() {
     echo "Usage: $0 [-m mode] [-h host] [-P port] [-u user] [-p password]"
-    echo "          [-t threads] [-d tool] [-V version] [-o path] [-r path]"
-    echo "          [-D path] [-y] [-f] [-C]"
+    echo "          [-t threads] [-d tool] [-w timeout] [-V version] [-o path]"
+    echo "          [-r path] [-D path] [-y] [-f] [-C]"
     echo
     echo "Connection / mode options:"
     echo "  -m    Download mode: full, update, test, sqlite, or hfh"
@@ -88,6 +90,8 @@ usage() {
     echo "  -p    SFTP password"
     echo "  -t    lftp parallel threads (default: ${LFTP_THREADS})"
     echo "  -d    Download tool: lftp or sftp"
+    echo "  -w    Connection timeout in seconds (default: ${CONNECT_TIMEOUT}). Applied to the"
+    echo "        pre-flight connection check and every sftp/lftp connection."
     echo "  -C    Enable SSH transport compression for the download. Off by"
     echo "        default; useful on slow links. May slow downloads down on"
     echo "        fast links carrying already-dense data (hashes, indexes)."
@@ -113,16 +117,35 @@ usage() {
     exit 0
 }
 
-# lftp options applied to every invocation. sftp:auto-confirm makes lftp
-# accept unknown host keys instead of failing with a cryptic error — matches
-# the -oStrictHostKeyChecking=no used on the sftp fallback.
-LFTP_SETTINGS="set sftp:auto-confirm yes;"
+# lftp options and sftp connect options applied to every invocation. Both are
+# built by init_timeouts() (after parse_args) so they honour the -w override.
+#
+#   LFTP_SETTINGS    - sftp:auto-confirm accepts unknown host keys instead of
+#                      failing with a cryptic error (matches the sftp fallback's
+#                      -oStrictHostKeyChecking). The net:* limits bound how long
+#                      lftp waits and retries: without net:max-retries lftp
+#                      retries a failed connection (e.g. a wrong port) forever,
+#                      so the script would hang instead of erroring out.
+#   SFTP_CONNECT_OPTS- ConnectTimeout makes a wrong host/port fail in seconds
+#                      instead of hanging on the TCP connect; the ServerAlive
+#                      settings drop a connection that goes silent mid-transfer
+#                      rather than blocking indefinitely.
+LFTP_SETTINGS=""
+SFTP_CONNECT_OPTS=""
+
+init_timeouts() {
+    if ! [[ "$CONNECT_TIMEOUT" =~ ^[0-9]+$ ]] || (( CONNECT_TIMEOUT < 1 )); then
+        die "Invalid -w timeout: '${CONNECT_TIMEOUT}'. Must be a positive integer (seconds)."
+    fi
+    LFTP_SETTINGS="set sftp:auto-confirm yes; set net:timeout ${CONNECT_TIMEOUT}; set net:max-retries 3; set net:reconnect-interval-base 5; set net:reconnect-interval-multiplier 1;"
+    SFTP_CONNECT_OPTS="-oConnectTimeout=${CONNECT_TIMEOUT} -oServerAliveInterval=15 -oServerAliveCountMax=4"
+}
 
 # Run an SFTP batch command and return stdout.
 sftp_cmd() {
     local cmd="$1"
     sshpass -p "$SFTP_PASS" \
-        sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SSH_COMPRESS_FLAGS \
+        sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SFTP_CONNECT_OPTS $SSH_COMPRESS_FLAGS \
         "$SFTP_USER@$SFTP_HOST" <<< "$cmd" 2>/dev/null
 }
 
@@ -288,7 +311,7 @@ download_path() {
         # spaces would silently land in the wrong directory.
         start_progress "$parent_dir/$remote_base"
         ( cd "$parent_dir" && sshpass -p "$SFTP_PASS" \
-            sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SSH_COMPRESS_FLAGS \
+            sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SFTP_CONNECT_OPTS $SSH_COMPRESS_FLAGS \
             -r "$SFTP_USER@$SFTP_HOST:$remote_path" . )
         stop_progress
 
@@ -321,7 +344,7 @@ download_file() {
         # directly: OpenSSH sftp's CLI re-splits the local arg on whitespace.
         start_progress "$local_path"
         ( cd "$local_dir" && sshpass -p "$SFTP_PASS" \
-            sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SSH_COMPRESS_FLAGS \
+            sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SFTP_CONNECT_OPTS $SSH_COMPRESS_FLAGS \
             "$SFTP_USER@$SFTP_HOST:$remote_path" "$local_base" )
         stop_progress
     fi
@@ -374,7 +397,7 @@ download_full_kb() {
 # ---------------------------------------------------------------------------
 
 parse_args() {
-    while getopts "m:h:P:u:p:t:d:V:o:r:D:yfC?" opt; do
+    while getopts "m:h:P:u:p:t:d:V:o:r:D:w:yfC?" opt; do
         case $opt in
             m) MODE="$OPTARG" ;;
             h) SFTP_HOST="$OPTARG" ;;
@@ -383,6 +406,7 @@ parse_args() {
             p) SFTP_PASS="$OPTARG" ;;
             t) LFTP_THREADS="$OPTARG" ;;
             d) DOWNLOAD_TOOL="$OPTARG" ;;
+            w) CONNECT_TIMEOUT="$OPTARG" ;;
             V) KB_VERSION="$OPTARG" ;;
             o) OSS_DEST="$OPTARG" ;;
             r) REST_DEST="$OPTARG" ;;
@@ -506,6 +530,36 @@ prompt_missing_connection() {
     [[ -n "$SFTP_HOST" ]] || die "SFTP host is required."
     [[ -n "$SFTP_PORT" ]] || die "SFTP port is required."
     [[ -n "$SFTP_USER" && -n "$SFTP_PASS" ]] || die "Username and password are required."
+}
+
+# Pre-flight connectivity/auth check. Runs one lightweight remote command with
+# a short timeout so a wrong host, port, username or password fails here with a
+# clear message, instead of hanging (or silently returning "no versions found")
+# later during version discovery.
+check_connection() {
+    echo
+    echo "Verifying connection to ${SFTP_HOST}:${SFTP_PORT} ..."
+    log "Verifying connection to ${SFTP_HOST}:${SFTP_PORT} as ${SFTP_USER}"
+
+    local output rc
+    if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
+        output=$(lftp -u "$SFTP_USER","$SFTP_PASS" \
+            -e "${LFTP_COMPRESS_SETTINGS} ${LFTP_SETTINGS} ls; exit" \
+            "sftp://${SFTP_HOST}:${SFTP_PORT}" 2>&1) && rc=0 || rc=$?
+    else
+        output=$(sshpass -p "$SFTP_PASS" \
+            sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SFTP_CONNECT_OPTS $SSH_COMPRESS_FLAGS \
+            "$SFTP_USER@$SFTP_HOST" <<< "pwd" 2>&1) && rc=0 || rc=$?
+    fi
+
+    if (( rc != 0 )); then
+        log "Connection check failed (exit ${rc}): ${output}"
+        [[ -n "$output" ]] && echo "$output" >&2
+        die "Could not connect to ${SFTP_HOST}:${SFTP_PORT} as '${SFTP_USER}'. Check the host, port, username and password (the SFTP server uses a custom port, not 22)."
+    fi
+
+    echo "Connection OK."
+    log "Connection check succeeded."
 }
 
 # ---------------------------------------------------------------------------
@@ -905,6 +959,7 @@ kb_download() {
 # ---------------------------------------------------------------------------
 
 parse_args "$@"
+init_timeouts
 
 # Make sure any background progress poller dies with the script.
 trap 'stop_progress' EXIT INT TERM
@@ -918,6 +973,7 @@ init_download_tool
 prompt_missing_mode
 init_compression_settings
 prompt_missing_connection
+check_connection
 
 if [[ "$MODE" == "test" ]]; then
     kb_download_test

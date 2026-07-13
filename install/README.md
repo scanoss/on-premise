@@ -170,6 +170,7 @@ All connection details, paths, and the download mode can be passed as arguments 
 | `-p` | SFTP password |
 | `-t` | lftp parallel download threads (default: 25) |
 | `-d` | Force download tool: `lftp` or `sftp` |
+| `-w` | Connection timeout in seconds (default: 15). Applied to the pre-flight connection check and every sftp/lftp connection, so a wrong host/port fails fast instead of hanging. |
 | `-C` | Enable SSH transport compression. Off by default. Useful on slow links; on fast links it typically *slows* the transfer down (zlib CPU exceeds the bandwidth saving for dense payloads like hashes and indexes). |
 
 **Path / version overrides**
