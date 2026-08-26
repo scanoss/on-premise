@@ -58,7 +58,15 @@ REMOTE_SIZE_BYTES=""
 # because zlib overhead exceeds the bandwidth saving on fast links carrying
 # already-dense payloads (hashes, indexes); useful for slow links.
 SSH_COMPRESS_FLAGS=""
-LFTP_COMPRESS_SETTINGS=""
+
+# Authentication. Password only: public-key auth is disabled outright so no
+# key from ssh-agent or ~/.ssh is ever offered. A rejected key would otherwise
+# burn one of the server's allowed auth attempts before the password is sent.
+SSH_AUTH_FLAGS="-oPubkeyAuthentication=no -oPreferredAuthentications=password,keyboard-interactive"
+
+# lftp talks to the SFTP server through this ssh command line. Rebuilt by
+# init_compression_settings() when -C is given.
+LFTP_CONNECT_SETTINGS="set sftp:connect-program \"ssh -a -x ${SSH_AUTH_FLAGS}\";"
 
 # PID of the background progress poller (only used for sftp downloads).
 PROGRESS_PID=""
@@ -145,7 +153,7 @@ init_timeouts() {
 sftp_cmd() {
     local cmd="$1"
     sshpass -p "$SFTP_PASS" \
-        sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SFTP_CONNECT_OPTS $SSH_COMPRESS_FLAGS \
+        sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SFTP_CONNECT_OPTS $SSH_AUTH_FLAGS $SSH_COMPRESS_FLAGS \
         "$SFTP_USER@$SFTP_HOST" <<< "$cmd" 2>/dev/null
 }
 
@@ -153,7 +161,7 @@ sftp_cmd() {
 lftp_cmd() {
     local cmd="$1"
     lftp -u "$SFTP_USER","$SFTP_PASS" \
-        -e "${LFTP_COMPRESS_SETTINGS} ${LFTP_SETTINGS} $cmd; exit" \
+        -e "${LFTP_CONNECT_SETTINGS} ${LFTP_SETTINGS} $cmd; exit" \
         "sftp://${SFTP_HOST}:${SFTP_PORT}" 2>/dev/null
 }
 
@@ -161,7 +169,7 @@ lftp_cmd() {
 init_compression_settings() {
     if [[ -n "$COMPRESS" ]]; then
         SSH_COMPRESS_FLAGS="-oCompression=yes"
-        LFTP_COMPRESS_SETTINGS='set sftp:connect-program "ssh -a -x -C";'
+        LFTP_CONNECT_SETTINGS="set sftp:connect-program \"ssh -a -x ${SSH_AUTH_FLAGS} -C\";"
         echo "SSH transport compression enabled (-C)."
     fi
 }
@@ -259,7 +267,7 @@ read_remote_file() {
     rm -f "$tmpfile"
     if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
         lftp -u "$SFTP_USER","$SFTP_PASS" \
-            -e "${LFTP_COMPRESS_SETTINGS} ${LFTP_SETTINGS} get \"$remote_path\" -o \"$tmpfile\"; exit" \
+            -e "${LFTP_CONNECT_SETTINGS} ${LFTP_SETTINGS} get \"$remote_path\" -o \"$tmpfile\"; exit" \
             "sftp://${SFTP_HOST}:${SFTP_PORT}" &>/dev/null
     else
         sftp_cmd "get \"$remote_path\" \"$tmpfile\"" >/dev/null 2>&1
@@ -290,7 +298,7 @@ download_path() {
         mkdir -p "$local_path"
         echo "Downloading ${remote_path} with lftp (${LFTP_THREADS} parallel threads, resumable)..."
         lftp -u "$SFTP_USER","$SFTP_PASS" \
-            -e "${LFTP_COMPRESS_SETTINGS} ${LFTP_SETTINGS} mirror -c -P ${LFTP_THREADS} \"$remote_path\" \"$local_path\"; exit" \
+            -e "${LFTP_CONNECT_SETTINGS} ${LFTP_SETTINGS} mirror -c -P ${LFTP_THREADS} \"$remote_path\" \"$local_path\"; exit" \
             "sftp://${SFTP_HOST}:${SFTP_PORT}"
     else
         echo "Downloading ${remote_path} with sftp..."
@@ -311,7 +319,7 @@ download_path() {
         # spaces would silently land in the wrong directory.
         start_progress "$parent_dir/$remote_base"
         ( cd "$parent_dir" && sshpass -p "$SFTP_PASS" \
-            sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SFTP_CONNECT_OPTS $SSH_COMPRESS_FLAGS \
+            sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SFTP_CONNECT_OPTS $SSH_AUTH_FLAGS $SSH_COMPRESS_FLAGS \
             -r "$SFTP_USER@$SFTP_HOST:$remote_path" . )
         stop_progress
 
@@ -333,7 +341,7 @@ download_file() {
     if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
         echo "Downloading ${remote_path} with lftp (${LFTP_THREADS} parallel chunks, resumable)..."
         lftp -u "$SFTP_USER","$SFTP_PASS" \
-            -e "${LFTP_COMPRESS_SETTINGS} ${LFTP_SETTINGS} pget -c -n ${LFTP_THREADS} \"$remote_path\" -o \"$local_path\"; exit" \
+            -e "${LFTP_CONNECT_SETTINGS} ${LFTP_SETTINGS} pget -c -n ${LFTP_THREADS} \"$remote_path\" -o \"$local_path\"; exit" \
             "sftp://${SFTP_HOST}:${SFTP_PORT}"
     else
         echo "Downloading ${remote_path} with sftp..."
@@ -344,7 +352,7 @@ download_file() {
         # directly: OpenSSH sftp's CLI re-splits the local arg on whitespace.
         start_progress "$local_path"
         ( cd "$local_dir" && sshpass -p "$SFTP_PASS" \
-            sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SFTP_CONNECT_OPTS $SSH_COMPRESS_FLAGS \
+            sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SFTP_CONNECT_OPTS $SSH_AUTH_FLAGS $SSH_COMPRESS_FLAGS \
             "$SFTP_USER@$SFTP_HOST:$remote_path" "$local_base" )
         stop_progress
     fi
@@ -544,11 +552,11 @@ check_connection() {
     local output rc
     if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
         output=$(lftp -u "$SFTP_USER","$SFTP_PASS" \
-            -e "${LFTP_COMPRESS_SETTINGS} ${LFTP_SETTINGS} ls; exit" \
+            -e "${LFTP_CONNECT_SETTINGS} ${LFTP_SETTINGS} ls; exit" \
             "sftp://${SFTP_HOST}:${SFTP_PORT}" 2>&1) && rc=0 || rc=$?
     else
         output=$(sshpass -p "$SFTP_PASS" \
-            sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SFTP_CONNECT_OPTS $SSH_COMPRESS_FLAGS \
+            sftp -P "$SFTP_PORT" -oBatchMode=no -oStrictHostKeyChecking=accept-new $SFTP_CONNECT_OPTS $SSH_AUTH_FLAGS $SSH_COMPRESS_FLAGS \
             "$SFTP_USER@$SFTP_HOST" <<< "pwd" 2>&1) && rc=0 || rc=$?
     fi
 
