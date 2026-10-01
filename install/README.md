@@ -60,7 +60,7 @@ The following is recommended for running the SCANOSS Applications and SCANOSS KB
 |-----|---------------------------|---------------------------|
 | **CPU** | 8 Core x64 - 3.5 Ghz      | 32 Core x64 - 3.6 Ghz     |
 | **RAM** | 32GB                      | 128GB                     |
-| **HDD** | 24.5TB SSD (NVMe preferred) | 26.5TB SSD (NVMe preferred) |
+| **HDD** | 25.0TB SSD (NVMe preferred) | 27.0TB SSD (NVMe preferred) |
 
 ### Test Knowledge Base Requirements
 
