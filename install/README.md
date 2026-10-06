@@ -115,6 +115,41 @@ sudo ./install-scanoss.sh
 
 You will be prompted with an option menu, select option 1 ```Install everything``` for an automatic installation of SCANOSS.
 
+#### Non-interactive / Automated Updates
+
+`install-scanoss.sh` can also run option 1 (`Install everything`) without the menu, so it can be scheduled (e.g. from cron) to fetch and deploy new versions automatically:
+
+| Flag | Description |
+|------|-------------|
+| `-a` | Action to run without the menu. Only `all` is supported (same as menu option 1) |
+| `-s` | With `-a all`, also download and install decoration services: `all`, or a comma-separated list of `dependencies`, `components`, `vulnerabilities`, `cryptography`, `geoprovenance`, `licenses`, `folder-hashing-api`. Default: none (decoration services always use their latest release) |
+| `-h` | SFTP host (default: from `config.sh`) |
+| `-P` | SFTP port (default: from `config.sh`) |
+| `-u` | SFTP username |
+| `-p` | SFTP password |
+| `-y` | Don't prompt (requires `-a all`). Credentials are taken from `-u`/`-p`, or from `~/.scanoss_sftp` saved by a previous run; the script exits with an error if neither is available |
+| `-?` | Show help |
+
+Component versions are taken from `config.sh` (`latest` by default).
+
+When run this way (and when using menu option 1):
+
+- Downloaded component folders are kept in sync with the SFTP server, so files of previous versions are removed.
+- A component (core or decoration service) is only installed if its package changed since its last successful install (tracked by checksum in `/opt/scanoss/.installed/`). Unchanged components are skipped, so the API is not reinstalled/restarted needlessly. The first run after upgrading to this version of the script reinstalls every component once.
+- If the dependency installation, SFTP connection check or any download fails, nothing is installed. The script exits with a non-zero code on any failure.
+
+```
+# First run: credentials are saved to ~/.scanoss_sftp
+sudo ./install-scanoss.sh -y -a all -u USER21 -p mypassword
+
+# Following runs reuse the saved credentials, e.g. a nightly root cron job:
+0 3 * * * /path/to/on-premise/install/install-scanoss.sh -y -a all >> /var/log/scanoss-auto-update.log 2>&1
+
+# Also keep decoration services up to date (all of them, or a selection):
+0 3 * * * /path/to/on-premise/install/install-scanoss.sh -y -a all -s all >> /var/log/scanoss-auto-update.log 2>&1
+0 3 * * * /path/to/on-premise/install/install-scanoss.sh -y -a all -s vulnerabilities,licenses >> /var/log/scanoss-auto-update.log 2>&1
+```
+
 After finishing the installation run ```sudo systemctl start scanoss-go-api.service``` to start the API service
 
 > **_Note:_** For more information on installation options, API management and API configuration check [Configuration](#configuration) section at the end of this guide.
