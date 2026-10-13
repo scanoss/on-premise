@@ -137,6 +137,7 @@ When run this way (and when using menu option 1):
 - Downloaded component folders are kept in sync with the SFTP server, so files of previous versions are removed.
 - A component (core or decoration service) is only installed if its package changed since its last successful install (tracked by checksum in `/opt/scanoss/.installed/`). Unchanged components are skipped, so the API is not reinstalled/restarted needlessly. The first run after upgrading to this version of the script reinstalls every component once.
 - If the dependency installation, SFTP connection check or any download fails, nothing is installed. The script exits with a non-zero code on any failure.
+- The `env-setup.sh` of the API and of each decoration service runs with its own "skip prompts" flag (`-f` or `-y`, depending on the package) and without input, so a prompt the flag does not cover takes its default answer: existing configuration files and SQLite databases are never replaced. With that flag the API's `env-setup.sh` also starts `scanoss-go-api`.
 
 ```
 # First run: credentials are saved to ~/.scanoss_sftp

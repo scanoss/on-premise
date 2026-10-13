@@ -311,6 +311,24 @@ skip_if_unchanged() {
     return 1
 }
 
+# Runs a package's env-setup.sh from its scripts dir. Under -y it never waits
+# for input: the package's "skip prompts" flag is passed (the packages don't
+# agree on one: getopts based ones take -y, the others -f) and stdin is
+# /dev/null, so any prompt the flag does not cover takes its default answer.
+run_env_setup() {
+    local dir="$1" flag=""
+    if [[ -z "$NON_INTERACTIVE" ]]; then
+        (cd "$dir" && ./env-setup.sh)
+        return
+    fi
+    if grep -qE 'getopts "[^"]*y' "$dir/env-setup.sh"; then
+        flag="-y"
+    elif grep -qE '"-f"|-f[|)]' "$dir/env-setup.sh"; then
+        flag="-f"
+    fi
+    (cd "$dir" && ./env-setup.sh $flag </dev/null)
+}
+
 mark_installed() {
     local component="$1" pkg="$2"
     mkdir -p "$INSTALLED_DIR"
@@ -400,7 +418,7 @@ install_api() {
 
     if [[ -f "$tmpdir/scripts/env-setup.sh" ]]; then
         chmod +x "$tmpdir/scripts/env-setup.sh"
-        if ! (cd "$tmpdir/scripts" && ./env-setup.sh); then
+        if ! run_env_setup "$tmpdir/scripts"; then
             echo "Error: API env-setup.sh failed."
             rm -rf "$tmpdir"
             return 1
@@ -471,7 +489,7 @@ install_decoration_service() {
 
     if [[ -f "$tmpdir/scripts/env-setup.sh" ]]; then
         chmod +x "$tmpdir/scripts/env-setup.sh"
-        if ! (cd "$tmpdir/scripts" && ./env-setup.sh); then
+        if ! run_env_setup "$tmpdir/scripts"; then
             echo "Error: $service env-setup.sh failed."
             rm -rf "$tmpdir"
             return 1
