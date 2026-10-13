@@ -18,6 +18,7 @@
     - [How it Works](#how-it-works)
     - [Example Sessions](#example-sessions)
     - [Verifying a KB Update](#verifying-a-kb-update)
+  - [Automated Updates (scanoss-update.sh)](#automated-updates-scanoss-updatesh)
   - [Verifying Installation](#verifying-installation)
 - [Configuration](#configuration)
     - [Manual Installation Workflow](#manual-installation-workflow)
@@ -79,6 +80,7 @@ The following is recommended for running the SCANOSS Applications and SCANOSS Te
 
 - [install-scanoss.sh](./install-scanoss.sh): bash script for installing SCANOSS (SFTP user setup creation, dependencies installation and application download/install)
 - [kb-download.sh](./kb-download.sh): bash script for downloading the full KB, KB updates, the test KB, a SQLite KB snapshot, or an HFH KB snapshot from the SCANOSS SFTP server. KB update downloads ship with an `ldb-import.sh` helper that imports the update into your local LDB.
+- [scanoss-update.sh](./scanoss-update.sh): non-interactive wrapper meant for scheduled jobs (e.g. cron): updates the SCANOSS binaries (via `install-scanoss.sh`) and, optionally, deploys the full KB (via `kb-download.sh` or from a local folder)
 - [test.sh](./test.sh): bash script for verifying the correct installation of SCANOSS and the SCANOSS KB
 - [resources](/resources): directory containing files for testing the installation of SCANOSS and the SCANOSS KB
 - [config.sh](./config.sh): configuration file
@@ -117,9 +119,9 @@ sudo ./install-scanoss.sh
 
 You will be prompted with an option menu, select option 1 ```Install everything``` for an automatic installation of SCANOSS.
 
-#### Non-interactive / Automated Updates
+#### Non-interactive Mode
 
-`install-scanoss.sh` can also run option 1 (`Install everything`) without the menu, so it can be scheduled (e.g. from cron) to fetch and deploy new versions automatically:
+`install-scanoss.sh` can also run option 1 (`Install everything`) without the menu. This is what [scanoss-update.sh](#automated-updates-scanoss-updatesh) calls; for scheduled updates (binaries and KB) use that script instead.
 
 | Flag | Description |
 |------|-------------|
@@ -145,12 +147,8 @@ When run this way (and when using menu option 1):
 # First run: credentials are saved to ~/.scanoss_sftp
 sudo ./install-scanoss.sh -y -a all -u USER21 -p mypassword
 
-# Following runs reuse the saved credentials, e.g. a nightly root cron job:
-0 3 * * * /path/to/on-premise/install/install-scanoss.sh -y -a all >> /var/log/scanoss-auto-update.log 2>&1
-
-# Also keep decoration services up to date (all of them, or a selection):
-0 3 * * * /path/to/on-premise/install/install-scanoss.sh -y -a all -s all >> /var/log/scanoss-auto-update.log 2>&1
-0 3 * * * /path/to/on-premise/install/install-scanoss.sh -y -a all -s vulnerabilities,licenses >> /var/log/scanoss-auto-update.log 2>&1
+# Following runs reuse the saved credentials; also update all decoration services:
+sudo ./install-scanoss.sh -y -a all -s all
 ```
 
 After finishing the installation run ```sudo systemctl start scanoss-go-api.service``` to start the API service
@@ -497,6 +495,49 @@ scanoss-py scan /tmp/scanoss_kb_update/26.03/26.03_test_snippet.wfp
 If both scans return appropriate matches, the update was imported successfully.
 
 > **Note:** If the import is interrupted, it may cause corruption in the existing LDB.
+
+### Automated Updates (scanoss-update.sh)
+
+`scanoss-update.sh` keeps an installation up to date without any interaction, so it can be scheduled (e.g. a nightly root cron job). It calls the scripts next to it:
+
+1. `install-scanoss.sh -y -a all` installs/updates the binaries (and, with `-s`, decoration services). Components whose package did not change are skipped.
+2. Optionally, the **full KB** is deployed into `/var/lib/ldb/oss`, either downloaded from SFTP with `kb-download.sh -y -m full` (`-k`) or copied from a local folder (`-K`). If `/var/lib/ldb/oss/version.json` already shows that version, the KB step is skipped. The KB is only deployed if step 1 succeeded.
+
+It must be run as root, from a checkout where all scripts are the same release (it refuses to run with an `install-scanoss.sh` that has no non-interactive mode).
+
+| Flag | Description |
+|------|-------------|
+| `-s` | Also update decoration services: `all` or a comma-separated list (passed to `install-scanoss.sh`) |
+| `-k` | Deploy the full KB from SFTP: `latest` (from `kb/full/LATEST.txt`) or a version, e.g. `26.09` |
+| `-K` | Deploy the full KB from a local folder holding `oss/`, e.g. `/data/26.09`. The folder is copied and left intact. Cannot be combined with `-k` |
+| `-S` | Stop the active `scanoss*` services while the KB is deployed and start them again afterwards, also when the deployment fails or the script is interrupted. Requires `-k` or `-K` |
+| `-h` | SFTP host (default: from `config.sh`) |
+| `-P` | SFTP port (default: from `config.sh`) |
+| `-u` | SFTP username |
+| `-p` | SFTP password |
+| `-?` | Show help |
+
+Without `-u`/`-p` the credentials saved in `~/.scanoss_sftp` by a previous run are used.
+
+```
+# First run: install/update binaries and deploy the latest full KB; credentials are saved
+sudo ./scanoss-update.sh -k latest -u USER21 -p mypassword
+
+# Nightly root cron job: binaries, all decoration services and the latest full KB,
+# with the services stopped while a new KB is written
+0 3 * * * /path/to/on-premise/install/scanoss-update.sh -s all -k latest -S >> /var/log/scanoss-auto-update.log 2>&1
+
+# Deploy a full KB that was already copied to the server
+sudo ./scanoss-update.sh -K /data/26.09
+```
+
+Things to know:
+
+- The full KB is written **in place** over the existing `/var/lib/ldb/oss` (same as `kb-download.sh -m full`); files of the previous version that the new one does not contain are left there. The non-`oss` items of a downloaded full KB go to `/tmp/scanoss_kb_full_<version>`.
+- While a KB deployment runs, `/opt/scanoss/.installed/kb.in-progress` exists. If a deployment fails or is interrupted, the file stays and the next run deploys the KB again, even if `version.json` already shows the new version.
+- Without `-S` the services keep running while the KB is written.
+- Only one run at a time: a second run exits with an error while another one holds `/var/lock/scanoss-update.lock`.
+- The script ends with a summary line (`Summary: binaries: OK; KB: deployed 26.09`) and exits with a non-zero code if any step failed.
 
 ### Verifying installation
 
