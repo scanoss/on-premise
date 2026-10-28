@@ -63,25 +63,12 @@ install_dependencies() {
 
             dnf install -y "${common_packages[@]}" "${rpm_packages[@]}"
 
-            # sshpass (needed by kb-download.sh) lives in EPEL
-            if ! dnf install -y sshpass; then
-                dnf install -y epel-release && dnf install -y sshpass \
-                    || log "Warning: could not install sshpass (enable EPEL and install it manually)."
-            fi
-
-            # Build libsodium from source if not installed
-            if ! ldconfig -p | grep -q libsodium; then
-                log "Building libsodium from source..."
-                dnf groupinstall -y 'Development Tools'
-                local tmpdir
-                tmpdir=$(mktemp -d)
-                curl -sL -o "$tmpdir/libsodium.tar.gz" \
-                    https://download.libsodium.org/libsodium/releases/libsodium-1.0.20-stable.tar.gz
-                tar -xzf "$tmpdir/libsodium.tar.gz" -C "$tmpdir"
-                (cd "$tmpdir/libsodium-stable" && ./configure && make -j"$(nproc)" && make install)
-                ldconfig
-                rm -rf "$tmpdir"
-            fi
+            # libsodium (needed by scanoss-encoder) and sshpass (needed by
+            # kb-download.sh) come from EPEL, so they get security updates via dnf
+            dnf install -y epel-release \
+                || log "Warning: could not install epel-release (on RHEL, enable EPEL manually)."
+            dnf install -y libsodium sshpass \
+                || log "Warning: could not install libsodium/sshpass (enable EPEL and install them manually)."
             ;;
     esac
 
