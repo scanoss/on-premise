@@ -41,7 +41,7 @@ create_directories() {
 install_dependencies() {
     log "Installing system dependencies..."
 
-    local common_packages=(gzip tar unzip curl lftp jq wget)
+    local common_packages=(gzip tar curl lftp)
 
     case "$OS" in
         Debian)
@@ -53,15 +53,21 @@ install_dependencies() {
                 log "Warning: could not detect libsodium package, falling back to $libsodium_pkg"
             fi
 
-            local deb_packages=(coreutils unrar-free xz-utils p7zip-full "$libsodium_pkg" libgcrypt20-dev)
+            local deb_packages=(sshpass openssh-client "$libsodium_pkg" libgcrypt20)
 
             apt-get update -qq
             apt-get install -y -qq "${common_packages[@]}" "${deb_packages[@]}"
             ;;
         CentOS)
-            local rpm_packages=(coreutils-common xz openssh-clients openssl)
+            local rpm_packages=(openssh-clients libgcrypt)
 
             dnf install -y "${common_packages[@]}" "${rpm_packages[@]}"
+
+            # sshpass (needed by kb-download.sh) lives in EPEL
+            if ! dnf install -y sshpass; then
+                dnf install -y epel-release && dnf install -y sshpass \
+                    || log "Warning: could not install sshpass (enable EPEL and install it manually)."
+            fi
 
             # Build libsodium from source if not installed
             if ! ldconfig -p | grep -q libsodium; then
