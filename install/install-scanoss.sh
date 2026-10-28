@@ -41,10 +41,12 @@ create_directories() {
 install_dependencies() {
     log "Installing system dependencies..."
 
-    local common_packages=(gzip tar curl lftp)
+    local common_packages=(gzip tar lftp)
 
     case "$OS" in
         Debian)
+            apt-get update -qq || { log "Error: apt-get update failed."; return 1; }
+
             # Detect libsodium package name from available packages
             local libsodium_pkg
             libsodium_pkg=$(apt-cache search '^libsodium[0-9]' 2>/dev/null | awk '{print $1}' | head -1)
@@ -53,15 +55,18 @@ install_dependencies() {
                 log "Warning: could not detect libsodium package, falling back to $libsodium_pkg"
             fi
 
-            local deb_packages=(sshpass openssh-client "$libsodium_pkg" libgcrypt20)
+            local deb_packages=(curl sshpass openssh-client "$libsodium_pkg" libgcrypt20)
 
-            apt-get update -qq
-            apt-get install -y -qq "${common_packages[@]}" "${deb_packages[@]}"
+            apt-get install -y -qq "${common_packages[@]}" "${deb_packages[@]}" \
+                || { log "Error: package installation failed."; return 1; }
             ;;
         CentOS)
             local rpm_packages=(openssh-clients libgcrypt)
+            # Minimal EL9+ images ship curl-minimal, which conflicts with the curl package
+            command -v curl &>/dev/null || rpm_packages+=(curl)
 
-            dnf install -y "${common_packages[@]}" "${rpm_packages[@]}"
+            dnf install -y "${common_packages[@]}" "${rpm_packages[@]}" \
+                || { log "Error: package installation failed."; return 1; }
 
             # libsodium (needed by scanoss-encoder) and sshpass (needed by
             # kb-download.sh) come from EPEL, so they get security updates via dnf
