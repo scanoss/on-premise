@@ -41,10 +41,12 @@ create_directories() {
 install_dependencies() {
     log "Installing system dependencies..."
 
-    local common_packages=(gzip tar unzip curl lftp jq wget)
+    local common_packages=(gzip tar lftp)
 
     case "$OS" in
         Debian)
+            apt-get update -qq || { log "Error: apt-get update failed."; return 1; }
+
             # Detect libsodium package name from available packages
             local libsodium_pkg
             libsodium_pkg=$(apt-cache search '^libsodium[0-9]' 2>/dev/null | awk '{print $1}' | head -1)
@@ -53,29 +55,25 @@ install_dependencies() {
                 log "Warning: could not detect libsodium package, falling back to $libsodium_pkg"
             fi
 
-            local deb_packages=(coreutils unrar-free xz-utils p7zip-full "$libsodium_pkg" libgcrypt20-dev)
+            local deb_packages=(curl sshpass openssh-client "$libsodium_pkg" libgcrypt20)
 
-            apt-get update -qq
-            apt-get install -y -qq "${common_packages[@]}" "${deb_packages[@]}"
+            apt-get install -y -qq "${common_packages[@]}" "${deb_packages[@]}" \
+                || { log "Error: package installation failed."; return 1; }
             ;;
         CentOS)
-            local rpm_packages=(coreutils-common xz openssh-clients openssl)
+            local rpm_packages=(openssh-clients libgcrypt)
+            # Minimal EL9+ images ship curl-minimal, which conflicts with the curl package
+            command -v curl &>/dev/null || rpm_packages+=(curl)
 
-            dnf install -y "${common_packages[@]}" "${rpm_packages[@]}"
+            dnf install -y "${common_packages[@]}" "${rpm_packages[@]}" \
+                || { log "Error: package installation failed."; return 1; }
 
-            # Build libsodium from source if not installed
-            if ! ldconfig -p | grep -q libsodium; then
-                log "Building libsodium from source..."
-                dnf groupinstall -y 'Development Tools'
-                local tmpdir
-                tmpdir=$(mktemp -d)
-                curl -sL -o "$tmpdir/libsodium.tar.gz" \
-                    https://download.libsodium.org/libsodium/releases/libsodium-1.0.20-stable.tar.gz
-                tar -xzf "$tmpdir/libsodium.tar.gz" -C "$tmpdir"
-                (cd "$tmpdir/libsodium-stable" && ./configure && make -j"$(nproc)" && make install)
-                ldconfig
-                rm -rf "$tmpdir"
-            fi
+            # libsodium (needed by scanoss-encoder) and sshpass (needed by
+            # kb-download.sh) come from EPEL, so they get security updates via dnf
+            dnf install -y epel-release \
+                || log "Warning: could not install epel-release (on RHEL, enable EPEL manually)."
+            dnf install -y libsodium sshpass \
+                || log "Warning: could not install libsodium/sshpass (enable EPEL and install them manually)."
             ;;
     esac
 

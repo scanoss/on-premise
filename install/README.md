@@ -23,6 +23,7 @@
     - [Manual Installation Workflow](#manual-installation-workflow)
     - [API Service Management](#api-service-management)
     - [API Configuration](#api-configuration)
+- [Testing the Installer](#testing-the-installer)
 - [Installation Flow Diagram](#installation-flow-diagram)
 
 - [Support](#support)
@@ -81,6 +82,7 @@ The following is recommended for running the SCANOSS Applications and SCANOSS Te
 - [test.sh](./test.sh): bash script for verifying the correct installation of SCANOSS and the SCANOSS KB
 - [resources](/resources): directory containing files for testing the installation of SCANOSS and the SCANOSS KB
 - [config.sh](./config.sh): configuration file
+- [tests](./tests): tests for the installation scripts (see [Testing the Installer](#testing-the-installer))
 
 ## Installation Guide
 
@@ -539,6 +541,21 @@ In case you want to modify the configuration of the API service, the configurati
 Inside the configuration file, you will see multiple options such as app information, logging, telemetry, networking, TLS encryption and filtering. All the available configuration options are already present in the file, though some may be empty.
 
 To restart the service with the new options you added/modified, run the ```install-scanoss.sh``` choose option 5) Install Application and then option 5) API, and the service will update with the new configuration.
+
+## Testing the Installer
+
+[tests/test-dependencies.sh](./tests/test-dependencies.sh) runs option 2) Install system dependencies of ```install-scanoss.sh``` inside clean Docker containers, and checks that every command (```gzip```, ```tar```, ```curl```, ```lftp```, ```sshpass```, ```ssh```, ```sftp```) and shared library (```libsodium.so.23```, ```libgcrypt.so.20```, ```libz.so.1```) required by the SCANOSS components and scripts is installed. It only needs Docker, no SFTP credentials.
+
+By default it tests both installer variants: Debian (```debian:12```, ```debian:13```) and the Fedora/RHEL family (```rockylinux:8```, ```rockylinux:9```). You can pass other images as arguments:
+
+```
+./tests/test-dependencies.sh
+./tests/test-dependencies.sh debian:13 almalinux:10
+```
+
+Each container's output is saved to a log file (set ```LOG_DIR``` to choose the directory). The script exits with a non-zero code if any image fails.
+
+> **_Note:_** ```almalinux:10``` and ```fedora``` currently fail: their libsodium package provides ```libsodium.so.26```, while ```scanoss-encoder``` is linked against ```libsodium.so.23```.
 
 ## Installation Flow Diagram
 
