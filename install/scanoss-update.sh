@@ -108,12 +108,41 @@ load_kb_creds() {
     [[ -n "$SFTP_USER" && -n "$SFTP_PASSWORD" ]] || { echo "Error: no SFTP credentials (-u/-p or ~/.scanoss_sftp)."; return 1; }
 }
 
-# Latest full KB version from LATEST.txt. Same password-only auth and
-# timeouts as kb-download.sh, so a wrong host/port fails instead of hanging.
-read_latest_kb_version() {
+# Prints a file from the SFTP server. Same password-only auth and timeouts as
+# kb-download.sh, so a wrong host/port fails instead of hanging.
+sftp_cat() {
     lftp -u "$SFTP_USER","$SFTP_PASSWORD" \
-        -e "set sftp:connect-program \"ssh -a -x -oPubkeyAuthentication=no -oPreferredAuthentications=password,keyboard-interactive\"; set sftp:auto-confirm yes; set net:timeout 15; set net:max-retries 3; cat ${REMOTE_PATH_FULL}/LATEST.txt; exit" \
-        "sftp://${SFTP_HOST}:${SFTP_PORT}" 2>/dev/null | tr -d '[:space:]'
+        -e "set sftp:connect-program \"ssh -a -x -oPubkeyAuthentication=no -oPreferredAuthentications=password,keyboard-interactive\"; set sftp:auto-confirm yes; set net:timeout 15; set net:max-retries 3; cat $1; exit" \
+        "sftp://${SFTP_HOST}:${SFTP_PORT}" 2>/dev/null
+}
+
+# Size in bytes of a full KB on the server: total_size_bytes from its
+# metadata.json (written by the server when the KB is published), empty if it
+# cannot be read.
+read_remote_kb_size() {
+    sftp_cat "${REMOTE_PATH_FULL}/$1/metadata.json" \
+        | grep -oE '"total_size_bytes"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$'
+}
+
+# Refuses the deployment unless the new KB fits: its size plus KB_MIN_FREE_GB
+# must not exceed the free space plus the space of the KB it overwrites in
+# place. Sizes are apparent sizes (du -sb), like total_size_bytes. The KB
+# folder is resolved first, so a symlinked /var/lib/ldb or oss is measured on
+# the filesystem it points to.
+check_kb_space() {
+    local new_size="$1" kb_real current free buffer
+    [[ "$KB_MIN_FREE_GB" =~ ^[0-9]+$ ]] || { echo "Error: invalid KB_MIN_FREE_GB '$KB_MIN_FREE_GB' in config.sh."; return 1; }
+    buffer=$(( KB_MIN_FREE_GB * 1024 * 1024 * 1024 ))
+    kb_real=$(readlink -f "$KB_DIR")
+    current=$(du -sb "$kb_real" | cut -f1)
+    free=$(df -B1 --output=avail "$kb_real" | tail -n1 | tr -d ' ')
+    [[ -n "$current" && -n "$free" ]] || { echo "Error: could not measure the disk space of $kb_real."; return 1; }
+
+    log "Disk space on $kb_real: new KB $(numfmt --to=iec "$new_size"), installed KB $(numfmt --to=iec "$current"), free $(numfmt --to=iec "$free"), buffer ${KB_MIN_FREE_GB}G"
+    if (( new_size + buffer > current + free )); then
+        echo "Error: not enough disk space for the new KB: it needs $(numfmt --to=iec "$new_size") + ${KB_MIN_FREE_GB}G buffer (KB_MIN_FREE_GB), but only $(numfmt --to=iec $(( current + free ))) is available (free space + the installed KB it replaces)."
+        return 1
+    fi
 }
 
 stop_services() {
@@ -143,7 +172,7 @@ deploy_kb() {
     else
         load_kb_creds || return 1
         if [[ "$KB_VERSION" == "latest" ]]; then
-            target=$(read_latest_kb_version)
+            target=$(sftp_cat "${REMOTE_PATH_FULL}/LATEST.txt" | tr -d '[:space:]')
             [[ -n "$target" ]] || { echo "Error: could not read ${REMOTE_PATH_FULL}/LATEST.txt from ${SFTP_HOST}:${SFTP_PORT}."; return 1; }
         else
             target="$KB_VERSION"
@@ -158,15 +187,19 @@ deploy_kb() {
         return 0
     fi
 
-    # kb-download.sh checks the free space against the size of the whole KB.
-    # When the new KB overwrites an installed one in place, that space is
-    # already used by the old KB, so the check would always fail: skip it (-f).
-    # A first deployment keeps the check.
-    local force=()
-    [[ -f "$KB_DIR/version.json" ]] && force=(-f)
+    # Checked before anything is stopped, downloaded or copied.
+    local new_size
+    if [[ -n "$KB_PATH" ]]; then
+        new_size=$(du -sb "$(readlink -f "$KB_PATH/oss")" | cut -f1)
+    else
+        new_size=$(read_remote_kb_size "$target")
+        [[ -n "$new_size" ]] || { echo "Error: could not read ${REMOTE_PATH_FULL}/${target}/metadata.json from ${SFTP_HOST}:${SFTP_PORT}."; return 1; }
+    fi
+    mkdir -p "$KB_DIR"
+    check_kb_space "$new_size" || return 1
 
     log "Deploying full KB $target to $KB_DIR (installed: ${installed:-none})"
-    mkdir -p "$(dirname "$KB_MARKER")" "$KB_DIR"
+    mkdir -p "$(dirname "$KB_MARKER")"
     echo "$target" > "$KB_MARKER"
 
     [[ -n "$STOP_SERVICES" ]] && stop_services
@@ -175,8 +208,9 @@ deploy_kb() {
     if [[ -n "$KB_PATH" ]]; then
         cp -a "$KB_PATH/oss/." "$KB_DIR/" || rc=1
     else
-        [[ ${#force[@]} -gt 0 ]] && log "Overwriting the installed KB in $KB_DIR: kb-download.sh disk space check skipped."
-        "$KB_DOWNLOAD" -y "${force[@]}" -m full -V "$target" -o "$KB_DIR" \
+        # -f: check_kb_space replaces kb-download.sh's own disk space check,
+        # which ignores the space of the KB being overwritten and has no buffer.
+        "$KB_DOWNLOAD" -y -f -m full -V "$target" -o "$KB_DIR" \
             -h "$SFTP_HOST" -P "$SFTP_PORT" -u "$SFTP_USER" -p "$SFTP_PASSWORD" || rc=1
     fi
 
@@ -194,7 +228,8 @@ deploy_kb() {
         log "KB $target deployment failed; it will be retried on the next run."
         return 1
     fi
-    chown -R "$RUNTIME_USER:$RUNTIME_USER" "$KB_DIR"
+    # Resolved: chown -R does not descend into a symlinked oss folder.
+    chown -R "$RUNTIME_USER:$RUNTIME_USER" "$(readlink -f "$KB_DIR")"
     rm -f "$KB_MARKER"
     log "KB $target deployed."
     KB_RESULT="deployed $target"

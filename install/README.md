@@ -557,7 +557,8 @@ Things to know:
 - The full KB is written **in place** over the existing `/var/lib/ldb/oss` (same as `kb-download.sh -m full`); files of the previous version that the new one does not contain are left there. The non-`oss` items of a downloaded full KB go to `/tmp/scanoss_kb_full_<version>`.
 - While a KB deployment runs, `/opt/scanoss/.installed/kb.in-progress` exists. If a deployment fails or is interrupted, the file stays and the next run deploys the KB again, even if `version.json` already shows the new version.
 - Without `-S` the services keep running while the KB is written.
-- With `-k`, `kb-download.sh` checks that there is enough free space for the whole KB. When a KB is already installed in `/var/lib/ldb/oss` (it has a `version.json`), the new one overwrites it in place and reuses its space, so the check is skipped. On a first deployment the check applies and the KB step fails if there is not enough space.
+- Before anything is stopped, downloaded or copied, the script checks that the new KB fits: its size plus a buffer of `KB_MIN_FREE_GB` (in `config.sh`, default 50 GB) must not exceed the free space plus the space of the installed KB it overwrites. If it does not fit, the KB step fails and nothing is changed. The new KB size is `total_size_bytes` from the KB's `metadata.json` on the SFTP server (`-k`) or the size of the local `oss` folder (`-K`). This check replaces the one in `kb-download.sh`, which is called with `-f`. Files of the previous KB that the new one does not contain are not counted, as they are not removed.
+- `/var/lib/ldb` or `/var/lib/ldb/oss` can be a symlink to another disk (e.g. `/data/ldb`): disk space and ownership are handled on the folder it points to.
 - Only one run at a time: a second run exits with an error while another one holds `/var/lock/scanoss-update.lock`.
 - The script ends with a summary line (`Summary: binaries: OK; KB: deployed 26.09`) and exits with a non-zero code if any step failed.
 

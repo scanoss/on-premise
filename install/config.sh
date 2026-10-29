@@ -9,6 +9,9 @@ RUNTIME_USER="scanoss"
 
 # Knowledge base
 LDB_LOCATION="/var/lib/ldb"
+# Free space (GB) that must remain on the KB filesystem after scanoss-update.sh
+# deploys a full KB. The deployment is refused if it would leave less.
+KB_MIN_FREE_GB=50
 
 # SFTP defaults
 SFTP_HOST="sftp.scanoss.com"
