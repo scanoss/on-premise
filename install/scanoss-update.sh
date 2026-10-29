@@ -158,6 +158,13 @@ deploy_kb() {
         return 0
     fi
 
+    # kb-download.sh checks the free space against the size of the whole KB.
+    # When the new KB overwrites an installed one in place, that space is
+    # already used by the old KB, so the check would always fail: skip it (-f).
+    # A first deployment keeps the check.
+    local force=()
+    [[ -f "$KB_DIR/version.json" ]] && force=(-f)
+
     log "Deploying full KB $target to $KB_DIR (installed: ${installed:-none})"
     mkdir -p "$(dirname "$KB_MARKER")" "$KB_DIR"
     echo "$target" > "$KB_MARKER"
@@ -168,7 +175,8 @@ deploy_kb() {
     if [[ -n "$KB_PATH" ]]; then
         cp -a "$KB_PATH/oss/." "$KB_DIR/" || rc=1
     else
-        "$KB_DOWNLOAD" -y -m full -V "$target" -o "$KB_DIR" \
+        [[ ${#force[@]} -gt 0 ]] && log "Overwriting the installed KB in $KB_DIR: kb-download.sh disk space check skipped."
+        "$KB_DOWNLOAD" -y "${force[@]}" -m full -V "$target" -o "$KB_DIR" \
             -h "$SFTP_HOST" -P "$SFTP_PORT" -u "$SFTP_USER" -p "$SFTP_PASSWORD" || rc=1
     fi
 

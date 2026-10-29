@@ -23,6 +23,11 @@ SKIP_UNCHANGED=""
 # Kept outside the download folders, which `mirror -e` keeps in sync with SFTP.
 INSTALLED_DIR="$APP_DIR/.installed"
 
+# Applied to every SFTP connection (same values as kb-download.sh): password
+# login only, and bounded timeouts/retries so an unreachable server makes the
+# script fail instead of hanging.
+LFTP_SETTINGS="set sftp:auto-confirm yes; set sftp:connect-program \"ssh -a -x -oPubkeyAuthentication=no -oPreferredAuthentications=password,keyboard-interactive\"; set net:timeout 15; set net:max-retries 3; set net:reconnect-interval-base 5; set net:reconnect-interval-multiplier 1;"
+
 usage() {
     echo "Usage: $0 [-y] [-a all] [-s services] [-h host] [-P port] [-u user] [-p password]"
     echo
@@ -175,6 +180,11 @@ install_dependencies() {
 
 # ─── SFTP Setup ─────────────────────────────────────────────────────────────
 
+# Runs lftp commands on the SFTP server.
+sftp_lftp() {
+    lftp -u "$SFTP_USER","$SFTP_PASSWORD" -p "$SFTP_PORT" "sftp://$SFTP_HOST" -e "$LFTP_SETTINGS $1; exit"
+}
+
 setup_sftp() {
     # Check lftp is installed
     if ! command -v lftp &>/dev/null; then
@@ -221,7 +231,7 @@ setup_sftp() {
 
     # Test connection
     echo "Testing connection..."
-    if lftp -u "$SFTP_USER","$SFTP_PASSWORD" -p "$SFTP_PORT" "sftp://$SFTP_HOST" -e "set sftp:auto-confirm yes; ls; exit" &>/dev/null; then
+    if sftp_lftp "ls" &>/dev/null; then
         echo "Connection successful."
     else
         echo "Error: Could not connect to SFTP server."
@@ -230,11 +240,10 @@ setup_sftp() {
 
     [[ -z "$save_creds" ]] && return 0
 
-    # Save credentials for later use
-    echo "SFTP_USER=$SFTP_USER" > ~/.scanoss_sftp
-    echo "SFTP_PASSWORD=$SFTP_PASSWORD" >> ~/.scanoss_sftp
-    echo "SFTP_HOST=$SFTP_HOST" >> ~/.scanoss_sftp
-    echo "SFTP_PORT=$SFTP_PORT" >> ~/.scanoss_sftp
+    # Save credentials for later use. Values are shell-quoted (%q) because the
+    # file is sourced: a password with spaces, quotes or $ must load unchanged.
+    (umask 077; printf 'SFTP_USER=%q\nSFTP_PASSWORD=%q\nSFTP_HOST=%q\nSFTP_PORT=%q\n' \
+        "$SFTP_USER" "$SFTP_PASSWORD" "$SFTP_HOST" "$SFTP_PORT" > ~/.scanoss_sftp)
     chmod 600 ~/.scanoss_sftp
 
     log "SFTP credentials saved to ~/.scanoss_sftp"
@@ -273,8 +282,7 @@ download_component() {
 
     # Check lftp's exit status too: on a failed mirror the previous version's
     # files are still in $local_path, so a non-empty directory proves nothing.
-    if lftp -u "$SFTP_USER","$SFTP_PASSWORD" -p "$SFTP_PORT" "sftp://$SFTP_HOST" -e \
-        "set sftp:auto-confirm yes; mirror -c -e -P 5 $remote_path $local_path; exit" 2>/dev/null \
+    if sftp_lftp "mirror -c -e -P 5 $remote_path $local_path" 2>/dev/null \
         && [[ -d "$local_path" ]] && ls "$local_path"/* &>/dev/null; then
         log "Downloaded $component $version to $local_path"
         echo "$component $version downloaded successfully."
@@ -578,8 +586,10 @@ install_all() {
     fi
     echo "All core components installed. Run the test script to verify:"
     echo "  ./test.sh"
-    echo ""
-    echo "To install decoration services, use menu option 8."
+    if [[ -z "$ACTION" ]]; then
+        echo ""
+        echo "To install decoration services, use menu option 8."
+    fi
 }
 
 # Menu option 1 / -a all (plus the -s decoration services). Stops before
