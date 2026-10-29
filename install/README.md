@@ -10,6 +10,7 @@
 - [Repository Contents](#repository-contents)
 - [Installation Guide](#installation-guide)
   - [Preparing the Environment](#preparing-the-environment)
+  - [System Dependencies](#system-dependencies)
   - [Installing SCANOSS Applications](#installing-scanoss-applications)
   - [Knowledge Base Download (kb-download.sh)](#knowledge-base-download-kb-downloadsh)
     - [KB Download Prerequisites](#kb-download-prerequisites)
@@ -106,6 +107,26 @@ chmod +x *.sh
 ```
 
 > **_Note:_** The `install-scanoss.sh` script needs to be run as root, either using ```sudo``` or directly as the root user. The `kb-download.sh` script can be run as a regular user.
+
+### System Dependencies
+
+Option 2) Install system dependencies of ```install-scanoss.sh``` (also run by option 1) installs the following packages:
+
+| Debian package | RHEL / Rocky package | Required by | Used for |
+|---|---|---|---|
+| `gzip`, `tar` | `gzip`, `tar` | `install-scanoss.sh`, API, decoration services | Extracting the API, decoration services and encoder packages; the API's and services' startup scripts compress log backups |
+| `findutils` | `findutils` | `install-scanoss.sh` | Locating the downloaded packages (`find`) |
+| `lftp` | `lftp` | `install-scanoss.sh`, `kb-download.sh`, `scanoss-update.sh` | Downloading components and the KB from the SFTP server |
+| `openssh-client` | `openssh-clients` | `lftp`, `kb-download.sh` | SSH transport used by `lftp` for SFTP, and `sftp` when `kb-download.sh` uses it instead of `lftp` |
+| `sshpass` | `sshpass` (EPEL) | `kb-download.sh` | Password authentication, only when downloading with `sftp` (`-d sftp`, or when `lftp` is not installed) |
+| `curl` | `curl` (only if missing) | `test.sh`, decoration services (all except `components`) | Test requests to the API; the services' `env-setup.sh` download default configuration files |
+| `libsodium23` | `libsodium` (EPEL) | scanoss-encoder | Shared library `libsodium.so.23` |
+| `libgcrypt20` | `libgcrypt` | engine, ldb (and scanoss-encoder, through `libldb.so`) | Shared library `libgcrypt.so.20` |
+| — | `epel-release` | RHEL / Rocky only | Repository that provides `libsodium` and `sshpass` |
+
+In addition, the engine and ldb packages declare their own dependencies (e.g. `zlib1g`, and `libgcrypt20` or, in older releases, `libgcrypt20-dev`), which are installed automatically when the packages are installed. Other tools used by the scripts (`coreutils`, `util-linux`'s `flock`, `systemd`) are part of the base system.
+
+> **_Note:_** The dependencies are installed only on the machine where ```install-scanoss.sh``` runs. If you run ```kb-download.sh``` on another machine, install `lftp` (recommended) or `openssh-client` + `sshpass` there.
 
 ### Installing SCANOSS Applications
 
