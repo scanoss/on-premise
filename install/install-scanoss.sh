@@ -130,11 +130,15 @@ create_directories() {
 install_dependencies() {
     log "Installing system dependencies..."
 
-    local common_packages=(gzip tar lftp)
+    # findutils: find locates the downloaded packages (missing on minimal EL8 images)
+    local common_packages=(gzip tar lftp findutils)
 
     case "$OS" in
         Debian)
             apt-get update -qq || { log "Error: apt-get update failed."; return 1; }
+            # Finish any package left half-configured by a previous failed install
+            # (e.g. by dpkg -i), otherwise apt refuses to install anything
+            apt-get install -f -y -qq || { log "Error: could not repair broken packages."; return 1; }
 
             # Detect libsodium package name from available packages
             local libsodium_pkg
@@ -333,6 +337,14 @@ mark_installed() {
     sha256sum "$pkg" | cut -d' ' -f1 > "$INSTALLED_DIR/$component"
 }
 
+# Installs a local .deb with apt, so its declared dependencies are pulled in
+# (dpkg -i would leave the package half-configured if any is missing).
+# --reinstall/--allow-downgrades keep dpkg -i's behaviour for the same or an
+# older (pinned) version.
+install_local_deb() {
+    apt-get install -y --reinstall --allow-downgrades "$1"
+}
+
 install_engine() {
     local version="${ENGINE_VERSION}"
     local pkg_dir="$APP_DIR/engine/$version"
@@ -347,7 +359,7 @@ install_engine() {
             fi
             skip_if_unchanged engine "$deb" && return 0
             log "Installing engine from $deb"
-            dpkg -i "$deb" || return 1
+            install_local_deb "$deb" || return 1
             mark_installed engine "$deb"
             ;;
         CentOS)
@@ -379,7 +391,7 @@ install_ldb() {
             fi
             skip_if_unchanged ldb "$deb" && return 0
             log "Installing ldb from $deb"
-            dpkg -i "$deb" || return 1
+            install_local_deb "$deb" || return 1
             mark_installed ldb "$deb"
             ;;
         CentOS)
@@ -553,8 +565,9 @@ install_all() {
     local rc=0
     create_scanoss_user
     create_directories
-    install_engine || rc=1
+    # ldb first: the engine rpm requires libldb.so, provided by the ldb package
     install_ldb || rc=1
+    install_engine || rc=1
     install_api || rc=1
     install_encoder || rc=1
     fix_ownership
