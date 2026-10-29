@@ -621,7 +621,13 @@ To restart the service with the new options you added/modified, run the ```insta
 
 ## Testing the Installer
 
-[tests/test-dependencies.sh](./tests/test-dependencies.sh) runs option 2) Install system dependencies of ```install-scanoss.sh``` inside clean Docker containers, and checks that every command (```gzip```, ```tar```, ```curl```, ```lftp```, ```sshpass```, ```ssh```, ```sftp```) and shared library (```libsodium.so.23```, ```libgcrypt.so.20```, ```libz.so.1```) required by the SCANOSS components and scripts is installed. It only needs Docker, no SFTP credentials.
+[tests/test-dependencies.sh](./tests/test-dependencies.sh) runs ```install-scanoss.sh``` inside clean Docker containers and checks that:
+
+1. Option 2) Install system dependencies installs every command (```gzip```, ```tar```, ```curl```, ```lftp```, ```sshpass```, ```ssh```, ```sftp```) and shared library (```libsodium.so.23```, ```libgcrypt.so.20```, ```libz.so.1```) required by the SCANOSS components and scripts.
+2. The real engine and ldb packages, downloaded from their GitHub releases, install with option 5) and run (```scanoss -v```, ```ldb -v```): first an older release (engine 5.4.25 / ldb 4.1.11, whose ```.deb``` packages declare ```Depends: libgcrypt20-dev```), then an upgrade to a newer one (engine 5.4.28 / ldb 4.1.13). Set ```OLD_ENGINE```, ```OLD_LDB```, ```NEW_ENGINE``` and ```NEW_LDB``` to test other versions.
+3. On Debian, a system left with half-configured packages by a previous failed install is repaired by option 2).
+
+It only needs Docker and internet access, no SFTP credentials.
 
 By default it tests both installer variants: Debian (```debian:12```, ```debian:13```) and the Fedora/RHEL family (```rockylinux:8```, ```rockylinux:9```). You can pass other images as arguments:
 
@@ -632,7 +638,9 @@ By default it tests both installer variants: Debian (```debian:12```, ```debian:
 
 Each container's output is saved to a log file (set ```LOG_DIR``` to choose the directory). The script exits with a non-zero code if any image fails.
 
-> **_Note:_** ```almalinux:10``` and ```fedora``` currently fail: their libsodium package provides ```libsodium.so.26```, while ```scanoss-encoder``` is linked against ```libsodium.so.23```.
+> **_Note:_** some images currently fail because of the published packages, not the installer:
+> - ```rockylinux:8```: the engine and ldb ```.rpm``` packages require glibc 2.33/2.34 and EL8 ships glibc 2.28.
+> - ```almalinux:10``` and ```fedora```: their libsodium package provides ```libsodium.so.26```, while ```scanoss-encoder``` is linked against ```libsodium.so.23``` (see scanoss/scanoss-encoder#12).
 
 ## Installation Flow Diagram
 
