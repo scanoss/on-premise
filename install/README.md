@@ -172,7 +172,7 @@ sudo ./install-scanoss.sh -y -a all -u USER21 -p mypassword
 sudo ./install-scanoss.sh -y -a all -s all
 ```
 
-After finishing the installation run ```sudo systemctl start scanoss-go-api.service``` to start the API service
+The API service (```scanoss-go-api```) is started at the end of the API installation. Check it with ```sudo systemctl status scanoss-go-api.service``` (see [API Service Management](#api-service-management)).
 
 > **_Note:_** For more information on installation options, API management and API configuration check [Configuration](#configuration) section at the end of this guide.
 
@@ -557,6 +557,8 @@ Things to know:
 - The full KB is written **in place** over the existing `/var/lib/ldb/oss` (same as `kb-download.sh -m full`); files of the previous version that the new one does not contain are left there. The non-`oss` items of a downloaded full KB go to `/tmp/scanoss_kb_full_<version>`.
 - While a KB deployment runs, `/opt/scanoss/.installed/kb.in-progress` exists. If a deployment fails or is interrupted, the file stays and the next run deploys the KB again, even if `version.json` already shows the new version.
 - Without `-S` the services keep running while the KB is written.
+- Before anything is stopped, downloaded or copied, the script checks that the new KB fits: its size plus a buffer of `KB_MIN_FREE_GB` (in `config.sh`, default 50 GB) must not exceed the free space plus the space of the installed KB it overwrites. If it does not fit, the KB step fails and nothing is changed. The new KB size is `total_size_bytes` from the KB's `metadata.json` on the SFTP server (`-k`) or the size of the local `oss` folder (`-K`). This check replaces the one in `kb-download.sh`, which is called with `-f`. Files of the previous KB that the new one does not contain are not counted, as they are not removed.
+- `/var/lib/ldb` or `/var/lib/ldb/oss` can be a symlink to another disk (e.g. `/data/ldb`): disk space and ownership are handled on the folder it points to.
 - Only one run at a time: a second run exits with an error while another one holds `/var/lock/scanoss-update.lock`.
 - The script ends with a summary line (`Summary: binaries: OK; KB: deployed 26.09`) and exits with a non-zero code if any step failed.
 
@@ -603,18 +605,30 @@ After verifying every part of SCANOSS is working, the installation process would
 
 ### Manual Installation Workflow
 
-In some cases, users may prefer to manually trigger each step and maybe skipping one (e.g. users who may want to download packages from one computer, and installing them in another). So if you are in this situation, the correct workflow for manual trigger of options would be:
+In some cases, users may prefer to manually trigger each step and maybe skip one (e.g. users who download the packages on one computer and install them on another). In that case, use the menu options of ```install-scanoss.sh``` in this order:
 
-1. Install Dependencies: this will automatically download all required system dependencies, based on your OS
-2. Setup SFTP Credentials: this option will prompt the user for their credentials (SFTP user and password)
-3. Download Application: this option will let you choose between download application packages from our SFTP server, or downloading it manually (instructions for setting up the correct directory structure and permissions included on the script)
-4. Install Application: this option will prompt the user with another menu with different options such as ```Install all applications and application dependencies```, ```Install application dependencies``` and options for installing each SCANOSS application separately.
+1. Option 2) Install system dependencies: installs the system packages required by SCANOSS, based on your OS
+2. Option 3) Setup SFTP credentials: prompts for the SFTP host, port, username and password, tests the connection and saves them to ```~/.scanoss_sftp```
+3. Option 6) Select versions (optional): chooses the engine, ldb, API and encoder versions to download and install for this session (default: from ```config.sh```, ```latest```)
+4. Option 4) Download core components from SFTP: downloads the engine, ldb, API and encoder packages to ```/opt/scanoss/<component>/<version>/```
+5. Option 5) Install core components: opens a menu to install all core components or a single one (engine, ldb, API or encoder) from the downloaded files
+6. Options 7) and 8): download and install the decoration services, the same way
 
-> **_Note:_**  During the script, you will also be prompted for setting up installation paths and so on. We recommend using the default values for most options, this will make it easier for debugging if needed.
+To install without access to the SFTP server, copy the packages into the folders option 4 would download them to (```<version>``` is the value from ```config.sh```, ```latest``` by default), then run options 2 and 5:
+
+| Component | Folder | Package |
+|-----------|--------|---------|
+| engine | ```/opt/scanoss/engine/<version>/``` | ```scanoss_*_amd64.deb``` (Debian) or ```scanoss*.rpm``` |
+| ldb | ```/opt/scanoss/ldb/<version>/``` | ```ldb_*_amd64.deb``` (Debian) or ```ldb*.rpm``` |
+| API | ```/opt/scanoss/api/<version>/``` | ```scanoss-go_linux-amd64_*.tgz``` |
+| encoder | ```/opt/scanoss/scanoss-encoder/<version>/``` | ```*.tar.gz``` |
+| decoration services | ```/opt/scanoss/<service>/latest/``` | ```scanoss-<service>-api_linux-amd64_*.tgz``` |
+
+> **_Note:_** The API and decoration service installers (```env-setup.sh```) ask for confirmation before installing; depending on the service they also ask before replacing existing configuration files or databases, and the API installer asks before starting the service (it never replaces an existing configuration file). We recommend keeping the default answers.
 
 ### API Service Management
 
-By default, the script doesn't start the API service, in order to start it run the following command:
+The API installer (```env-setup.sh```) starts the API service at the end of the installation (from the menu it asks first, the default answer is yes) and restarts it if it was already running. To start it manually run the following command:
 
 ```
 systemctl start scanoss-go-api.service
@@ -634,11 +648,15 @@ systemctl stop scanoss-go-api.service
 
 ### API Configuration
 
-In case you want to modify the configuration of the API service, the configuration file will be located in ```/opt/scanoss/tmp/scripts/app-config-prod.json``` (defined by the APP_DIR variable in ```config.sh```).
+In case you want to modify the configuration of the API service, the configuration file is located in ```/usr/local/etc/scanoss/api/app-config-prod.json```. The decoration services have theirs in ```/usr/local/etc/scanoss/<service>/app-config-prod.json```.
 
 Inside the configuration file, you will see multiple options such as app information, logging, telemetry, networking, TLS encryption and filtering. All the available configuration options are already present in the file, though some may be empty.
 
-To restart the service with the new options you added/modified, run the ```install-scanoss.sh``` choose option 5) Install Application and then option 5) API, and the service will update with the new configuration.
+To apply the options you added/modified, restart the service:
+
+```
+sudo systemctl restart scanoss-go-api.service
+```
 
 ## Testing the Installer
 
