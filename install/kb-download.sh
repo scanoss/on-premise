@@ -134,6 +134,8 @@ usage() {
 #                      lftp waits and retries: without net:max-retries lftp
 #                      retries a failed connection (e.g. a wrong port) forever,
 #                      so the script would hang instead of erroring out.
+#                      xfer:disk-full-fatal makes a full disk fail the download;
+#                      by default lftp waits for space to be freed, forever.
 #   SFTP_CONNECT_OPTS- ConnectTimeout makes a wrong host/port fail in seconds
 #                      instead of hanging on the TCP connect; the ServerAlive
 #                      settings drop a connection that goes silent mid-transfer
@@ -145,7 +147,7 @@ init_timeouts() {
     if ! [[ "$CONNECT_TIMEOUT" =~ ^[0-9]+$ ]] || (( CONNECT_TIMEOUT < 1 )); then
         die "Invalid -w timeout: '${CONNECT_TIMEOUT}'. Must be a positive integer (seconds)."
     fi
-    LFTP_SETTINGS="set sftp:auto-confirm yes; set net:timeout ${CONNECT_TIMEOUT}; set net:max-retries 3; set net:reconnect-interval-base 5; set net:reconnect-interval-multiplier 1;"
+    LFTP_SETTINGS="set sftp:auto-confirm yes; set net:timeout ${CONNECT_TIMEOUT}; set net:max-retries 3; set net:reconnect-interval-base 5; set net:reconnect-interval-multiplier 1; set xfer:disk-full-fatal true;"
     SFTP_CONNECT_OPTS="-oConnectTimeout=${CONNECT_TIMEOUT} -oServerAliveInterval=15 -oServerAliveCountMax=4"
 }
 
@@ -390,13 +392,20 @@ download_full_kb() {
     echo "Downloading remaining items to ${rest_dest} ..."
     mkdir -p "$rest_dest"
 
-    local items
+    local items dirs
     items=$(list_remote_items "$remote_version_path")
+    dirs=$(list_remote_dirs "$remote_version_path")
 
+    # lftp's mirror only takes directories, so plain files (README.md,
+    # metadata.json, ...) are fetched with download_file.
     while IFS= read -r item; do
         item=$(echo "$item" | tr -d '[:space:]')
         [[ -z "$item" || "$item" == "oss" ]] && continue
-        download_path "${remote_version_path}/${item}" "${rest_dest}/${item}"
+        if grep -qxF "$item" <<< "$dirs"; then
+            download_path "${remote_version_path}/${item}" "${rest_dest}/${item}"
+        else
+            download_file "${remote_version_path}/${item}" "${rest_dest}/${item}"
+        fi
     done <<< "$items"
 }
 

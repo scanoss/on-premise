@@ -2,6 +2,9 @@
 # Don't use set -e: we handle errors per function to avoid killing the whole
 # interactive menu when a single component fails.
 
+# cron runs jobs with PATH=/usr/bin:/bin; ldconfig and useradd are in sbin.
+export PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin"
+
 # Import configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
@@ -24,9 +27,9 @@ SKIP_UNCHANGED=""
 INSTALLED_DIR="$APP_DIR/.installed"
 
 # Applied to every SFTP connection (same values as kb-download.sh): password
-# login only, and bounded timeouts/retries so an unreachable server makes the
-# script fail instead of hanging.
-LFTP_SETTINGS="set sftp:auto-confirm yes; set sftp:connect-program \"ssh -a -x -oPubkeyAuthentication=no -oPreferredAuthentications=password,keyboard-interactive\"; set net:timeout 15; set net:max-retries 3; set net:reconnect-interval-base 5; set net:reconnect-interval-multiplier 1;"
+# login only, and bounded timeouts/retries so an unreachable server (or a full
+# disk) makes the script fail instead of hanging.
+LFTP_SETTINGS="set sftp:auto-confirm yes; set sftp:connect-program \"ssh -a -x -oPubkeyAuthentication=no -oPreferredAuthentications=password,keyboard-interactive\"; set net:timeout 15; set net:max-retries 3; set net:reconnect-interval-base 5; set net:reconnect-interval-multiplier 1; set xfer:disk-full-fatal true;"
 
 usage() {
     echo "Usage: $0 [-y] [-a all] [-s services] [-h host] [-P port] [-u user] [-p password]"

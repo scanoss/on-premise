@@ -3,7 +3,11 @@
 set -e # Exit immediately if a command exits with a non-zero status.
 
 # Import configuration file
-source ./config.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/config.sh"
+
+# WFP fingerprint of a known file, in resources/
+TEST_FILE_NAME="file_match.wfp"
 
 function verify_installation() {
 
@@ -11,9 +15,7 @@ function verify_installation() {
 
         echo "Performing a scan..."
 
-        cd "$(pwd)"/resources
-
-        curl -X POST -F "file=@$TEST_FILE_NAME" localhost:5443/scan/direct
+        curl -X POST -F "file=@$SCRIPT_DIR/resources/$TEST_FILE_NAME" localhost:5443/scan/direct
     
 
     }
