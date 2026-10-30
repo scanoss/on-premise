@@ -71,6 +71,11 @@ LFTP_CONNECT_SETTINGS="set sftp:connect-program \"ssh -a -x ${SSH_AUTH_FLAGS}\";
 # PID of the background progress poller (only used for sftp downloads).
 PROGRESS_PID=""
 
+# PID of the lftp mirror run by run_with_disk_watchdog(), and the free space
+# (bytes) below which the watchdog stops it: 100 MiB.
+WATCHED_PID=""
+DISK_FULL_BYTES=$(( 100 * 1024 * 1024 ))
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -247,6 +252,38 @@ stop_progress() {
     echo  # finalize the \r line with a newline
 }
 
+# Runs a download command, stopping it when the disk holding $1 runs full.
+# Needed for lftp's mirror: with xfer:disk-full-fatal each file fails at once,
+# but mirror still tries every remaining file (tens of thousands in a full KB)
+# before it exits. The limit is above 0 because ext4 keeps space for root and
+# XFS keeps a reserve, so a full disk does not always show 0 free.
+run_with_disk_watchdog() {
+    local dir="$1" full="" rc=0
+    shift
+    "$@" &
+    WATCHED_PID=$!
+    while kill -0 "$WATCHED_PID" 2>/dev/null; do
+        if (( $(df -B1 --output=avail "$dir" | tail -n1) < DISK_FULL_BYTES )); then
+            full=1
+            kill "$WATCHED_PID" 2>/dev/null || true
+            break
+        fi
+        sleep 2
+    done
+    wait "$WATCHED_PID" || rc=$?
+    WATCHED_PID=""
+    [[ -n "$full" ]] && die "The disk holding ${dir} is full (less than 100 MiB free); download stopped."
+    return $rc
+}
+
+# Stops the watched download when the script exits. A command started in the
+# background ignores Ctrl-C, so it would otherwise keep running on its own.
+stop_watched() {
+    [[ -z "$WATCHED_PID" ]] && return
+    kill "$WATCHED_PID" 2>/dev/null || true
+    WATCHED_PID=""
+}
+
 # List directories under a remote path, returning just the basenames.
 # Note: on SFTP servers that don't chroot, `ls -l <path>` prefixes each entry
 # with the path; the trailing `sed` normalizes the output to bare basenames.
@@ -299,7 +336,7 @@ download_path() {
     if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
         mkdir -p "$local_path"
         echo "Downloading ${remote_path} with lftp (${LFTP_THREADS} parallel threads, resumable)..."
-        lftp -u "$SFTP_USER","$SFTP_PASS" \
+        run_with_disk_watchdog "$local_path" lftp -u "$SFTP_USER","$SFTP_PASS" \
             -e "${LFTP_CONNECT_SETTINGS} ${LFTP_SETTINGS} mirror -c -P ${LFTP_THREADS} \"$remote_path\" \"$local_path\"; exit" \
             "sftp://${SFTP_HOST}:${SFTP_PORT}"
     else
@@ -978,8 +1015,13 @@ kb_download() {
 parse_args "$@"
 init_timeouts
 
-# Make sure any background progress poller dies with the script.
-trap 'stop_progress' EXIT INT TERM
+# Make sure any background progress poller or watched download dies with the
+# script. INT/TERM exit explicitly so the EXIT trap runs. "|| true": in a trap,
+# a bare return (as in stop_progress) returns the script's exit status, and a
+# non-zero status would end the trap under set -e before stop_watched runs.
+trap 'stop_progress || true; stop_watched' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "SCANOSS Knowledge Base Download"
 echo "================================"
