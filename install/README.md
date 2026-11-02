@@ -38,7 +38,7 @@
 2. Add execution permissions to the installation scripts: ```cd on-premise/install/ && chmod +x *.sh```
 3. Run the install-scanoss.sh script: ```sudo ./install-scanoss.sh```
 4. Choose option 1) Install everything
-5. Run the kb-download.sh script: ```./kb-download.sh``` and choose what to download (full KB, an update, the test KB, a SQLite KB snapshot, or an HFH KB snapshot). If you downloaded a KB update, run the `ldb-import.sh` script included in the download folder to import it into your local LDB.
+5. Run the kb-download.sh script: ```./kb-download.sh``` and choose what to download (full KB, an update, the test KB, a SQLite KB snapshot, an HFH KB snapshot, or the cryptography rulesets). If you downloaded a KB update, run the `ldb-import.sh` script included in the download folder to import it into your local LDB.
 6. Installation finished!
 
 ## Introduction
@@ -80,7 +80,7 @@ The following is recommended for running the SCANOSS Applications and SCANOSS Te
 ## Repository Contents
 
 - [install-scanoss.sh](./install-scanoss.sh): bash script for installing SCANOSS (SFTP user setup creation, dependencies installation and application download/install)
-- [kb-download.sh](./kb-download.sh): bash script for downloading the full KB, KB updates, the test KB, a SQLite KB snapshot, or an HFH KB snapshot from the SCANOSS SFTP server. KB update downloads ship with an `ldb-import.sh` helper that imports the update into your local LDB.
+- [kb-download.sh](./kb-download.sh): bash script for downloading the full KB, KB updates, the test KB, a SQLite KB snapshot, an HFH KB snapshot, or the cryptography rulesets from the SCANOSS SFTP server. KB update downloads ship with an `ldb-import.sh` helper that imports the update into your local LDB.
 - [scanoss-update.sh](./scanoss-update.sh): non-interactive wrapper meant for scheduled jobs (e.g. cron): updates the SCANOSS binaries (via `install-scanoss.sh`) and, optionally, deploys the full KB (via `kb-download.sh` or from a local folder)
 - [test.sh](./test.sh): bash script for verifying the correct installation of SCANOSS and the SCANOSS KB
 - [resources](/resources): directory containing files for testing the installation of SCANOSS and the SCANOSS KB
@@ -178,9 +178,11 @@ The API service (```scanoss-go-api```) is started at the end of the API installa
 
 ### Knowledge Base Download (kb-download.sh)
 
-The `kb-download.sh` script provides a unified way to download the full KB, a KB update, the test KB, a SQLite KB snapshot, or an HFH KB snapshot directly from the SCANOSS SFTP server. It connects to the server, lists all available versions, lets you choose which one to download, and checks for sufficient disk space before starting. For updates, a separate import script (`ldb-import.sh`) included in the downloaded folder handles importing into your local LDB.
+The `kb-download.sh` script provides a unified way to download the full KB, a KB update, the test KB, a SQLite KB snapshot, an HFH KB snapshot, or the cryptography rulesets directly from the SCANOSS SFTP server. It connects to the server, lists all available versions, lets you choose which one to download, and checks for sufficient disk space before starting. For updates, a separate import script (`ldb-import.sh`) included in the downloaded folder handles importing into your local LDB.
 
 The **test KB** is a small, pre-built LDB used to verify that your installation is working before loading the full production KB.
+
+The **cryptography rulesets** are the Deep Code Analysis (DCA) cryptography detection rules. They are not included in every subscription: if your account has no access to them, the `crypto_rulesets` mode stops with an error asking you to contact SCANOSS support.
 
 > **_Note:_** For users wanting to run the download in the background, we recommend using `tmux`:
 > 1. Install ```tmux```: ```sudo apt update && sudo apt install tmux``` for Debian or ```sudo yum install epel-release && sudo yum install tmux``` for CentOS.
@@ -220,7 +222,7 @@ All connection details, paths, and the download mode can be passed as arguments 
 
 | Flag | Description |
 |------|-------------|
-| `-m` | Download mode: `full` (full KB), `update` (KB update), `test` (test KB), `sqlite` (SQLite KB snapshot), or `hfh` (HFH KB snapshot) |
+| `-m` | Download mode: `full` (full KB), `update` (KB update), `test` (test KB), `sqlite` (SQLite KB snapshot), `hfh` (HFH KB snapshot), or `crypto_rulesets` (cryptography rulesets) |
 | `-h` | SFTP host |
 | `-P` | SFTP port |
 | `-u` | SFTP username |
@@ -234,10 +236,10 @@ All connection details, paths, and the download mode can be passed as arguments 
 
 | Flag | Description |
 |------|-------------|
-| `-V` | KB version (full/update/sqlite/hfh mode); default: latest from `LATEST.txt` on the server |
+| `-V` | Version (full/update/sqlite/hfh/crypto_rulesets mode); default: latest from `LATEST.txt` on the server |
 | `-o` | Destination path. Test mode: test-KB destination. Full mode: `oss` folder destination. (default: `/var/lib/ldb/oss`) |
 | `-r` | Full mode only: destination for non-oss items (default: `/tmp/scanoss_kb_full_<version>`) |
-| `-D` | Update / sqlite / hfh mode: download base directory. Final path is `<D>/<version>` for update/sqlite and `<D>/<version>.zip` for hfh. Defaults: `/tmp/scanoss_kb_update` for update, current directory for sqlite and hfh |
+| `-D` | Update / sqlite / hfh / crypto_rulesets mode: download base directory. Final path is `<D>/<version>` for update/sqlite/crypto_rulesets and `<D>/<version>.zip` for hfh. Defaults: `/tmp/scanoss_kb_update` for update, current directory for sqlite, hfh and crypto_rulesets |
 
 **Non-interactive flags**
 
@@ -276,6 +278,10 @@ Any options not provided on the command line will be prompted interactively, unl
 ./kb-download.sh -y -m hfh \
     -h sftp.test.xyz -P 12345 -u USER21 -p mypassword
 
+# Latest cryptography rulesets into the current directory (final path: ./<version>):
+./kb-download.sh -y -m crypto_rulesets \
+    -h sftp.test.xyz -P 12345 -u USER21 -p mypassword
+
 # Test KB:
 ./kb-download.sh -y -m test -h sftp.test.xyz -P 12345 -u USER21 -p mypassword
 ```
@@ -283,16 +289,17 @@ Any options not provided on the command line will be prompted interactively, unl
 #### How it Works
 
 1. **Connection**: the script prompts for (or reads from arguments) the SFTP host, port, username, and password
-2. **Mode selection**: you choose between downloading the full KB, a KB update, the test KB, a SQLite KB snapshot, or an HFH KB snapshot
-3. **Version discovery** (full/update/sqlite/hfh only): it connects to the SFTP server and lists all available versions of the chosen type, marking which one is the latest. Test KB has no versions — there is only one current test KB on the server.
-4. **Selection** (full/update/sqlite/hfh only): you choose which version to download (defaults to the latest)
-5. **Disk space check**: the script fetches the metadata and verifies there is enough free disk space before downloading. If not enough is available, you are warned and asked to confirm before continuing. (For HFH the size comes from `ls -l` on the remote `.zip` rather than `metadata.json`.) During an lftp download of a folder (full KB, update, test KB, SQLite), the download is also stopped with an error if the destination drops below 100 MiB of free space, even with `-f`.
+2. **Mode selection**: you choose between downloading the full KB, a KB update, the test KB, a SQLite KB snapshot, an HFH KB snapshot, or the cryptography rulesets
+3. **Version discovery** (full/update/sqlite/hfh/crypto_rulesets only): it connects to the SFTP server and lists all available versions of the chosen type, marking which one is the latest. Test KB has no versions — there is only one current test KB on the server.
+4. **Selection** (full/update/sqlite/hfh/crypto_rulesets only): you choose which version to download (defaults to the latest)
+5. **Disk space check**: the script fetches the metadata and verifies there is enough free disk space before downloading. If not enough is available, you are warned and asked to confirm before continuing. (For HFH the size comes from `ls -l` on the remote `.zip` rather than `metadata.json`. The cryptography rulesets are a few MB and skip this check.) During an lftp download of a folder (full KB, update, test KB, SQLite), the download is also stopped with an error if the destination drops below 100 MiB of free space, even with `-f`.
 6. **Download**:
    - **For full KB**: the download is split between two destinations. The `oss` folder (the main LDB data) goes to its own destination (default: `/var/lib/ldb/oss`), and all remaining files and folders go to a separate directory (default: `/tmp/scanoss_kb_full_<version>`). Both destinations can be changed when prompted.
    - **For updates**: the whole update folder is downloaded to a single directory (default: `/tmp/scanoss_kb_update/<version>`).
    - **For test KB**: the test KB's `oss` folder is downloaded to a single destination (default: `/var/lib/ldb/oss`). This will populate your LDB with the test data for verification.
    - **For SQLite KB**: the whole version folder is downloaded to `<base>/<version>` (default base: the current working directory). The folder contains one or more `.sqlite` files plus a `metadata.json`. The script downloads every file you have access to in that folder — different users may see different sets of `.sqlite` files depending on their SFTP permissions.
    - **For HFH KB**: a single `<version>.zip` archive is downloaded to `<base>/<version>.zip` (default base: the current working directory). With lftp the file is fetched in parallel chunks (`pget -n <threads>`); with sftp it's a single-stream `get` with the live progress poller. The script does not extract the archive — leave that to your downstream tooling.
+   - **For cryptography rulesets**: the version folder (`dca-<version>.tar.gz` and `manifest.json`) is downloaded to `<base>/<version>` (default base: the current working directory), and the tarball is checked against the `checksum_sha256` of `manifest.json`. A mismatch stops the script with an error.
 7. **Import (updates only)**: after downloading an update, run the `ldb-import.sh` script included in the downloaded folder
 
 #### Example Sessions
@@ -310,8 +317,9 @@ What do you want to download?
   3) Test KB
   4) SQLite KB
   5) HFH KB
+  6) Cryptography rulesets
 
-Select [1-5]: 2
+Select [1-6]: 2
 
 SFTP host: sftp.test.xyz
 SFTP port: 12345
@@ -503,6 +511,51 @@ Finished downloading hfh KB.
 ```
 
 HFH ships as a single `<version>.zip` archive (no `metadata.json`); the disk-space check reads the file size from the remote `ls -l` output. The script does not extract the archive — that's left to downstream tooling.
+
+##### Cryptography rulesets
+
+```
+./kb-download.sh -m crypto_rulesets -h sftp.test.xyz -P 12345 -u USER21
+
+SCANOSS Knowledge Base Download
+================================
+Using lftp for downloads (parallel, resumable).
+
+SFTP password:
+
+Verifying connection to sftp.test.xyz:12345 ...
+Connection OK.
+
+Fetching available cryptography rulesets versions...
+
+Available cryptography rulesets versions:
+-------------------
+  1) v1.38.0
+  2) v1.39.0  (latest)
+-------------------
+
+Select a cryptography rulesets version to download [1-2] (default: 2):
+
+Selected cryptography rulesets: v1.39.0
+
+Download directory [.]:
+
+lftp parallel threads [25]:
+
+Download cryptography rulesets v1.39.0 to ./v1.39.0? [Y/n]
+Downloading services/cryptography/rules/dca/v1.39.0 with lftp (25 parallel threads, resumable)...
+Checksum OK (sha256 from manifest.json).
+
+Cryptography rulesets downloaded to ./v1.39.0
+
+Finished downloading cryptography rulesets.
+```
+
+For an account without access to the rulesets:
+
+```
+ERROR: The cryptography rulesets are not available for this account (no services/cryptography/rules/dca on the server). Contact SCANOSS support to get access.
+```
 
 #### Verifying a KB Update
 

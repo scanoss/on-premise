@@ -5,8 +5,8 @@ set -e
 ###############################################################################
 # SCANOSS Knowledge Base Download Script
 #
-# Downloads the full KB, a KB update, the test KB, or a SQLite KB snapshot
-# from the SCANOSS SFTP server. Supports both lftp (parallel, resumable) and
+# Downloads the full KB, a KB update, the test KB, a SQLite KB snapshot, an
+# HFH KB snapshot, or the cryptography rulesets from the SCANOSS SFTP server. Supports both lftp (parallel, resumable) and
 # sftp fallback.
 #
 # Run with -? for the full list of CLI flags.
@@ -27,8 +27,9 @@ REMOTE_PATH_UPDATE="kb/update"
 REMOTE_PATH_TEST="kb/test/oss"
 REMOTE_PATH_SQLITE="kb/sqlite"
 REMOTE_PATH_HFH="kb/hfh"
+REMOTE_PATH_CRYPTO_RULESETS="services/cryptography/rules/dca"
 
-MODE=""            # "full", "update", "test", "sqlite", or "hfh"
+MODE=""            # "full", "update", "test", "sqlite", "hfh", or "crypto_rulesets"
 DOWNLOAD_TOOL=""   # set during init: "lftp" or "sftp"
 SFTP_USER=""
 SFTP_PASS=""
@@ -96,7 +97,7 @@ usage() {
     echo "          [-r path] [-D path] [-y] [-f] [-C]"
     echo
     echo "Connection / mode options:"
-    echo "  -m    Download mode: full, update, test, sqlite, or hfh"
+    echo "  -m    Download mode: full, update, test, sqlite, hfh, or crypto_rulesets"
     echo "  -h    SFTP host"
     echo "  -P    SFTP port"
     echo "  -u    SFTP username"
@@ -110,15 +111,17 @@ usage() {
     echo "        fast links carrying already-dense data (hashes, indexes)."
     echo
     echo "Path / version overrides (skip the matching interactive prompt):"
-    echo "  -V    KB version (full/update/sqlite/hfh mode); default: latest from LATEST.txt"
+    echo "  -V    Version (full/update/sqlite/hfh/crypto_rulesets mode); default: latest"
+    echo "        from LATEST.txt"
     echo "  -o    Destination path:"
     echo "          test mode -> test-KB destination (default: /var/lib/ldb/oss)"
     echo "          full mode -> 'oss' folder destination (default: /var/lib/ldb/oss)"
     echo "  -r    full mode: destination for non-oss items"
     echo "        (default: /tmp/scanoss_kb_full_<version>)"
-    echo "  -D    update/sqlite/hfh mode: download base directory"
-    echo "        (defaults: /tmp/scanoss_kb_update for update, cwd for sqlite and hfh."
-    echo "         Final path: <D>/<version> for update/sqlite, <D>/<version>.zip for hfh.)"
+    echo "  -D    update/sqlite/hfh/crypto_rulesets mode: download base directory"
+    echo "        (defaults: /tmp/scanoss_kb_update for update, cwd for the others."
+    echo "         Final path: <D>/<version> for update/sqlite/crypto_rulesets,"
+    echo "         <D>/<version>.zip for hfh.)"
     echo
     echo "Non-interactive flags:"
     echo "  -y    Don't prompt; use defaults for unspecified values, auto-confirm"
@@ -446,6 +449,18 @@ download_full_kb() {
     done <<< "$items"
 }
 
+# Check a downloaded cryptography ruleset: its dca-<version>.tar.gz against
+# the checksum_sha256 of its manifest.json.
+verify_crypto_ruleset() {
+    local dir="$1" version="$2" sum
+    sum=$(grep -oE '"checksum_sha256":[[:space:]]*"[0-9a-f]{64}"' "${dir}/manifest.json" 2>/dev/null | grep -oE '[0-9a-f]{64}' || true)
+    [[ -n "$sum" ]] || die "No checksum_sha256 in ${dir}/manifest.json: the download is incomplete. Remove ${dir} and run the script again."
+    echo "${sum}  ${dir}/dca-${version}.tar.gz" | sha256sum -c --quiet - >/dev/null 2>&1 \
+        || die "Checksum mismatch for ${dir}/dca-${version}.tar.gz. Remove ${dir} and run the script again."
+    echo "Checksum OK (sha256 from manifest.json)."
+    log "Cryptography ruleset ${version} checksum OK"
+}
+
 # ---------------------------------------------------------------------------
 # Initialization
 # ---------------------------------------------------------------------------
@@ -527,14 +542,14 @@ init_download_tool() {
 prompt_missing_mode() {
     if [[ -n "$MODE" ]]; then
         case "$MODE" in
-            full|update|test|sqlite|hfh) ;;
-            *) die "Invalid mode: ${MODE}. Use 'full', 'update', 'test', 'sqlite', or 'hfh'." ;;
+            full|update|test|sqlite|hfh|crypto_rulesets) ;;
+            *) die "Invalid mode: ${MODE}. Use 'full', 'update', 'test', 'sqlite', 'hfh', or 'crypto_rulesets'." ;;
         esac
         return
     fi
 
     if [[ -n "$NON_INTERACTIVE" ]]; then
-        die "Mode is required in non-interactive mode. Pass -m full|update|test|sqlite|hfh."
+        die "Mode is required in non-interactive mode. Pass -m full|update|test|sqlite|hfh|crypto_rulesets."
     fi
 
     echo
@@ -544,16 +559,18 @@ prompt_missing_mode() {
     echo "  3) Test KB"
     echo "  4) SQLite KB"
     echo "  5) HFH KB"
+    echo "  6) Cryptography rulesets"
     echo
     while true; do
-        read -p "Select [1-5]: " choice
+        read -p "Select [1-6]: " choice
         case $choice in
             1) MODE="full"; break ;;
             2) MODE="update"; break ;;
             3) MODE="test"; break ;;
             4) MODE="sqlite"; break ;;
             5) MODE="hfh"; break ;;
-            *) echo "Please enter 1, 2, 3, 4, or 5." ;;
+            6) MODE="crypto_rulesets"; break ;;
+            *) echo "Please enter 1, 2, 3, 4, 5, or 6." ;;
         esac
     done
 }
@@ -744,10 +761,16 @@ kb_download() {
             label="hfh KB"
             default_download="."
             ;;
+        crypto_rulesets)
+            remote_path="$REMOTE_PATH_CRYPTO_RULESETS"
+            label="cryptography rulesets"
+            default_download="."
+            ;;
     esac
 
     # Discover available versions. hfh is a flat directory of <version>.zip
-    # files; other modes have versioned subdirectories.
+    # files; other modes have versioned subdirectories. The ruleset versions
+    # (v1.9.0, v1.10.0, ...) are listed in version order, not alphabetically.
     echo
     echo "Fetching available ${label} versions..."
     log "Fetching available ${label} versions from ${SFTP_HOST}:${remote_path}"
@@ -755,10 +778,17 @@ kb_download() {
     local versions
     if [[ "$mode" == "hfh" ]]; then
         versions=$(list_remote_items "$remote_path" | grep '\.zip$' | sed 's/\.zip$//' | sort)
+    elif [[ "$mode" == "crypto_rulesets" ]]; then
+        versions=$(list_remote_dirs "$remote_path" | grep '^v[0-9]' | sort -V || true)
     else
         versions=$(list_remote_dirs "$remote_path")
     fi
 
+    # The rulesets are not part of every subscription: the folder is only there
+    # for the accounts that have them.
+    if [[ -z "$versions" && "$mode" == "crypto_rulesets" ]]; then
+        die "The cryptography rulesets are not available for this account (no ${remote_path} on the server). Contact SCANOSS support to get access."
+    fi
     if [[ -z "$versions" ]]; then
         echo "No ${label} versions found on the server."
         log "No ${label} versions found on the server."
@@ -882,10 +912,13 @@ kb_download() {
     fi
 
     # Fetch metadata and check disk space. hfh has no metadata.json, so its
-    # size comes from `ls -l` on the remote .zip file instead.
+    # size comes from `ls -l` on the remote .zip file instead. A ruleset is a
+    # few MB with no metadata.json: no disk space check.
     echo
     local remote_size=""
-    if [[ "$mode" == "hfh" ]]; then
+    if [[ "$mode" == "crypto_rulesets" ]]; then
+        :
+    elif [[ "$mode" == "hfh" ]]; then
         echo "Fetching ${label} file size..."
         remote_size=$(get_remote_file_size "${remote_path}/${kb_version}.zip" 2>/dev/null || true)
     else
@@ -941,7 +974,7 @@ kb_download() {
     else
         if [[ "$mode" == "hfh" ]]; then
             echo "WARN: could not determine remote file size, skipping disk space check."
-        else
+        elif [[ "$mode" != "crypto_rulesets" ]]; then
             echo "WARN: metadata.json not found on server, skipping disk space check."
         fi
     fi
@@ -994,6 +1027,7 @@ kb_download() {
         echo "Finished downloading ${label}."
     else
         download_path "${remote_path}/${kb_version}" "$download_dir_path"
+        [[ "$mode" == "crypto_rulesets" ]] && verify_crypto_ruleset "$download_dir_path" "$kb_version"
         echo
         echo "${label^} downloaded to ${download_dir_path}"
         log "${label^} downloaded to ${download_dir_path}"
