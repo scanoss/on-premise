@@ -38,7 +38,7 @@
 2. Add execution permissions to the installation scripts: ```cd on-premise/install/ && chmod +x *.sh```
 3. Run the install-scanoss.sh script: ```sudo ./install-scanoss.sh```
 4. Choose option 1) Install everything
-5. Run the kb-download.sh script: ```./kb-download.sh``` and choose what to download (full KB, an update, the test KB, a SQLite KB snapshot, an HFH KB snapshot, or the cryptography rulesets). If you downloaded a KB update, run the `ldb-import.sh` script included in the download folder to import it into your local LDB.
+5. Run the kb-download.sh script: ```./kb-download.sh``` and choose what to download (full KB, an update, the test KB, a SQLite KB snapshot, an HFH KB snapshot, the cryptography rulesets, or, for the crc64 KB, the crc64 full KB, a crc64 update or the DuckDB files). If you downloaded a KB update, run the `ldb-import.sh` script included in the download folder to import it into your local LDB.
 6. Installation finished!
 
 ## Introduction
@@ -80,8 +80,8 @@ The following is recommended for running the SCANOSS Applications and SCANOSS Te
 ## Repository Contents
 
 - [install-scanoss.sh](./install-scanoss.sh): bash script for installing SCANOSS (SFTP user setup creation, dependencies installation and application download/install)
-- [kb-download.sh](./kb-download.sh): bash script for downloading the full KB, KB updates, the test KB, a SQLite KB snapshot, an HFH KB snapshot, or the cryptography rulesets from the SCANOSS SFTP server. KB update downloads ship with an `ldb-import.sh` helper that imports the update into your local LDB.
-- [scanoss-update.sh](./scanoss-update.sh): non-interactive wrapper meant for scheduled jobs (e.g. cron): updates the SCANOSS binaries (via `install-scanoss.sh`) and, optionally, deploys the full KB (via `kb-download.sh` or from a local folder)
+- [kb-download.sh](./kb-download.sh): bash script for downloading the full KB, KB updates, the test KB, a SQLite KB snapshot, an HFH KB snapshot, the cryptography rulesets, the crc64 full KB, crc64 KB updates, or the DuckDB files from the SCANOSS SFTP server. KB update downloads ship with an `ldb-import.sh` helper that imports the update into your local LDB.
+- [scanoss-update.sh](./scanoss-update.sh): non-interactive wrapper meant for scheduled jobs (e.g. cron): updates the SCANOSS binaries (via `install-scanoss.sh`) and, optionally, deploys the full KB, md5 or crc64 (via `kb-download.sh` or from a local folder)
 - [test.sh](./test.sh): bash script for verifying the correct installation of SCANOSS and the SCANOSS KB
 - [resources](/resources): directory containing files for testing the installation of SCANOSS and the SCANOSS KB
 - [config.sh](./config.sh): configuration file
@@ -178,11 +178,13 @@ The API service (```scanoss-go-api```) is started at the end of the API installa
 
 ### Knowledge Base Download (kb-download.sh)
 
-The `kb-download.sh` script provides a unified way to download the full KB, a KB update, the test KB, a SQLite KB snapshot, an HFH KB snapshot, or the cryptography rulesets directly from the SCANOSS SFTP server. It connects to the server, lists all available versions, lets you choose which one to download, and checks for sufficient disk space before starting. For updates, a separate import script (`ldb-import.sh`) included in the downloaded folder handles importing into your local LDB.
+The `kb-download.sh` script provides a unified way to download the full KB, a KB update, the test KB, a SQLite KB snapshot, an HFH KB snapshot, the cryptography rulesets, the crc64 full KB, a crc64 KB update, or the DuckDB files directly from the SCANOSS SFTP server. It connects to the server, lists all available versions, lets you choose which one to download, and checks for sufficient disk space before starting. For updates, a separate import script (`ldb-import.sh`) included in the downloaded folder handles importing into your local LDB.
 
 The **test KB** is a small, pre-built LDB used to verify that your installation is working before loading the full production KB.
 
 The **cryptography rulesets** are the Deep Code Analysis (DCA) cryptography detection rules. They are not included in every subscription: if your account has no access to them, the `crypto_rulesets` mode stops with an error asking you to contact SCANOSS support.
+
+The **crc64 KB** is the LDB in the crc64 format, published next to the md5 one (`full`, `update`). Its tables have the same names as the md5 ones (the paths of the `file` table are in a separate `path` table), so never download it into a folder holding an md5 KB: the `crc64_full` mode has no default destination for the `oss` folder. The **DuckDB KB** holds the DuckDB files (`base.duckdb`, ...) that go with the crc64 KB. Like the rulesets, they are not included in every subscription: without access, the `crc64_full`, `crc64_update` and `duckdb` modes stop with an error asking you to contact SCANOSS support.
 
 > **_Note:_** For users wanting to run the download in the background, we recommend using `tmux`:
 > 1. Install ```tmux```: ```sudo apt update && sudo apt install tmux``` for Debian or ```sudo yum install epel-release && sudo yum install tmux``` for CentOS.
@@ -222,7 +224,7 @@ All connection details, paths, and the download mode can be passed as arguments 
 
 | Flag | Description |
 |------|-------------|
-| `-m` | Download mode: `full` (full KB), `update` (KB update), `test` (test KB), `sqlite` (SQLite KB snapshot), `hfh` (HFH KB snapshot), or `crypto_rulesets` (cryptography rulesets) |
+| `-m` | Download mode: `full` (full KB), `update` (KB update), `test` (test KB), `sqlite` (SQLite KB snapshot), `hfh` (HFH KB snapshot), `crypto_rulesets` (cryptography rulesets), `crc64_full` (crc64 full KB), `crc64_update` (crc64 KB update), or `duckdb` (DuckDB KB) |
 | `-h` | SFTP host |
 | `-P` | SFTP port |
 | `-u` | SFTP username |
@@ -236,10 +238,10 @@ All connection details, paths, and the download mode can be passed as arguments 
 
 | Flag | Description |
 |------|-------------|
-| `-V` | Version (full/update/sqlite/hfh/crypto_rulesets mode); default: latest from `LATEST.txt` on the server |
-| `-o` | Destination path. Test mode: test-KB destination. Full mode: `oss` folder destination. (default: `/var/lib/ldb/oss`) |
-| `-r` | Full mode only: destination for non-oss items (default: `/tmp/scanoss_kb_full_<version>`) |
-| `-D` | Update / sqlite / hfh / crypto_rulesets mode: download base directory. Final path is `<D>/<version>` for update/sqlite/crypto_rulesets and `<D>/<version>.zip` for hfh. Defaults: `/tmp/scanoss_kb_update` for update, current directory for sqlite, hfh and crypto_rulesets |
+| `-V` | Version (every mode except test); default: latest from `LATEST.txt` on the server |
+| `-o` | Destination path. Test mode: test-KB destination. Full mode: `oss` folder destination. (default: `/var/lib/ldb/oss`). crc64_full mode: `oss` folder destination, no default (required with `-y`); never a folder holding an md5 KB |
+| `-r` | Full / crc64_full mode: destination for non-oss items (default: `/tmp/scanoss_kb_full_<version>`, or `/tmp/scanoss_kb_crc64_full_<version>` for crc64_full) |
+| `-D` | Update / crc64_update / sqlite / duckdb / hfh / crypto_rulesets mode: download base directory. Final path is `<D>/<version>`, or `<D>/<version>.zip` for hfh. Defaults: `/tmp/scanoss_kb_update` for update, `/tmp/scanoss_kb_crc64_update` for crc64_update, current directory for sqlite, duckdb, hfh and crypto_rulesets |
 
 **Non-interactive flags**
 
@@ -282,6 +284,18 @@ Any options not provided on the command line will be prompted interactively, unl
 ./kb-download.sh -y -m crypto_rulesets \
     -h sftp.test.xyz -P 12345 -u USER21 -p mypassword
 
+# crc64 full KB: the 'oss' destination (-o) is required with -y:
+./kb-download.sh -y -m crc64_full -o /data/crc64/oss \
+    -h sftp.test.xyz -P 12345 -u USER21 -p mypassword
+
+# crc64 KB update (final path: /tmp/scanoss_kb_crc64_update/<version>):
+./kb-download.sh -y -m crc64_update \
+    -h sftp.test.xyz -P 12345 -u USER21 -p mypassword
+
+# DuckDB KB into the current directory (final path: ./<version>):
+./kb-download.sh -y -m duckdb \
+    -h sftp.test.xyz -P 12345 -u USER21 -p mypassword
+
 # Test KB:
 ./kb-download.sh -y -m test -h sftp.test.xyz -P 12345 -u USER21 -p mypassword
 ```
@@ -289,17 +303,20 @@ Any options not provided on the command line will be prompted interactively, unl
 #### How it Works
 
 1. **Connection**: the script prompts for (or reads from arguments) the SFTP host, port, username, and password
-2. **Mode selection**: you choose between downloading the full KB, a KB update, the test KB, a SQLite KB snapshot, an HFH KB snapshot, or the cryptography rulesets
-3. **Version discovery** (full/update/sqlite/hfh/crypto_rulesets only): it connects to the SFTP server and lists all available versions of the chosen type, marking which one is the latest. Test KB has no versions — there is only one current test KB on the server.
-4. **Selection** (full/update/sqlite/hfh/crypto_rulesets only): you choose which version to download (defaults to the latest)
-5. **Disk space check**: the script fetches the metadata and verifies there is enough free disk space before downloading. If not enough is available, you are warned and asked to confirm before continuing. (For HFH the size comes from `ls -l` on the remote `.zip` rather than `metadata.json`. The cryptography rulesets are a few MB and skip this check.) During an lftp download of a folder (full KB, update, test KB, SQLite), the download is also stopped with an error if the destination drops below 100 MiB of free space, even with `-f`.
+2. **Mode selection**: you choose between downloading the full KB, a KB update, the test KB, a SQLite KB snapshot, an HFH KB snapshot, the cryptography rulesets, the crc64 full KB, a crc64 KB update, or the DuckDB KB
+3. **Version discovery** (every mode except test): it connects to the SFTP server and lists all available versions of the chosen type, marking which one is the latest. Test KB has no versions — there is only one current test KB on the server.
+4. **Selection** (every mode except test): you choose which version to download (defaults to the latest)
+5. **Disk space check**: the script fetches the metadata and verifies there is enough free disk space before downloading. If not enough is available, you are warned and asked to confirm before continuing. (For HFH the size comes from `ls -l` on the remote `.zip` rather than `metadata.json`. The cryptography rulesets are a few MB and skip this check.) During an lftp download of a folder (full KB, update, test KB, SQLite, crc64 full KB, crc64 update, DuckDB), the download is also stopped with an error if the destination drops below 100 MiB of free space, even with `-f`.
 6. **Download**:
    - **For full KB**: the download is split between two destinations. The `oss` folder (the main LDB data) goes to its own destination (default: `/var/lib/ldb/oss`), and all remaining files and folders go to a separate directory (default: `/tmp/scanoss_kb_full_<version>`). Both destinations can be changed when prompted.
    - **For updates**: the whole update folder is downloaded to a single directory (default: `/tmp/scanoss_kb_update/<version>`).
+   - **For the crc64 full KB**: split like the full KB, but the `oss` folder has no default destination: you are asked for one (`-o` with `-y`). The remaining items go to `/tmp/scanoss_kb_crc64_full_<version>` by default.
+   - **For crc64 updates**: like updates, to `/tmp/scanoss_kb_crc64_update/<version>` by default.
    - **For test KB**: the test KB's `oss` folder is downloaded to a single destination (default: `/var/lib/ldb/oss`). This will populate your LDB with the test data for verification.
    - **For SQLite KB**: the whole version folder is downloaded to `<base>/<version>` (default base: the current working directory). The folder contains one or more `.sqlite` files plus a `metadata.json`. The script downloads every file you have access to in that folder — different users may see different sets of `.sqlite` files depending on their SFTP permissions.
    - **For HFH KB**: a single `<version>.zip` archive is downloaded to `<base>/<version>.zip` (default base: the current working directory). With lftp the file is fetched in parallel chunks (`pget -n <threads>`); with sftp it's a single-stream `get` with the live progress poller. The script does not extract the archive — leave that to your downstream tooling.
    - **For cryptography rulesets**: the version folder (`dca-<version>.tar.gz` and `manifest.json`) is downloaded to `<base>/<version>` (default base: the current working directory), and the tarball is checked against the `checksum_sha256` of `manifest.json`. A mismatch stops the script with an error.
+   - **For the DuckDB KB**: the version folder (the `.duckdb` files you have access to, each with its `.duckdb.sha256`, plus `RUN` and `metadata.json`) is downloaded to `<base>/<version>` (default base: the current working directory), and each `.duckdb` file is checked against its `.sha256`. A mismatch stops the script with an error naming the file: remove it and run the script again.
 7. **Import (updates only)**: after downloading an update, run the `ldb-import.sh` script included in the downloaded folder
 
 #### Example Sessions
@@ -575,7 +592,7 @@ If both scans return appropriate matches, the update was imported successfully.
 `scanoss-update.sh` keeps an installation up to date without any interaction, so it can be scheduled (e.g. a nightly root cron job). It calls the scripts next to it:
 
 1. `install-scanoss.sh -y -a all` installs/updates the binaries (and, with `-s`, decoration services). Components whose package did not change are skipped.
-2. Optionally, the **full KB** is deployed into `/var/lib/ldb/oss`, either downloaded from SFTP with `kb-download.sh -y -m full` (`-k`) or copied from a local folder (`-K`). If `/var/lib/ldb/oss/version.json` already shows that version, the KB step is skipped. The KB is only deployed if step 1 succeeded.
+2. Optionally, the **full KB** is deployed into `/var/lib/ldb/oss`, either downloaded from SFTP with `kb-download.sh -y -m full` (or `-m crc64_full` with `-F crc64`) (`-k`) or copied from a local folder (`-K`). If `/var/lib/ldb/oss/version.json` already shows that version, the KB step is skipped. The KB is only deployed if step 1 succeeded.
 
 It must be run as root, from a checkout where all scripts are the same release (it refuses to run with an `install-scanoss.sh` that has no non-interactive mode).
 
@@ -584,6 +601,7 @@ It must be run as root, from a checkout where all scripts are the same release (
 | `-s` | Also update decoration services: `all` or a comma-separated list (passed to `install-scanoss.sh`) |
 | `-k` | Deploy the full KB from SFTP: `latest` (from `kb/full/LATEST.txt`) or a version, e.g. `26.09` |
 | `-K` | Deploy the full KB from a local folder holding `oss/`, e.g. `/data/26.09`. The folder is copied and left intact. Cannot be combined with `-k` |
+| `-F` | KB format for `-k`/`-K`: `md5` (default) or `crc64` (from `kb/crc64/full`). A KB of the other format in `/var/lib/ldb/oss` is never overwritten: the KB step fails until it is moved or removed. With `-K` the folder must hold a KB of that format. Requires `-k` or `-K` |
 | `-S` | Stop the active `scanoss*` services while the KB is deployed and start them again afterwards, also when the deployment fails or the script is interrupted. Requires `-k` or `-K` |
 | `-h` | SFTP host (default: from `config.sh`) |
 | `-P` | SFTP port (default: from `config.sh`) |
@@ -603,12 +621,16 @@ sudo ./scanoss-update.sh -k latest -u USER21 -p mypassword
 
 # Deploy a full KB that was already copied to the server
 sudo ./scanoss-update.sh -K /data/26.09
+
+# Deploy the latest crc64 full KB (into an empty /var/lib/ldb/oss, or over a crc64 KB)
+sudo ./scanoss-update.sh -k latest -F crc64
 ```
 
 Things to know:
 
 - The full KB is written **in place** over the existing `/var/lib/ldb/oss` (same as `kb-download.sh -m full`); files of the previous version that the new one does not contain are left there. The non-`oss` items of a downloaded full KB go to `/tmp/scanoss_kb_full_<version>`.
 - While a KB deployment runs, `/opt/scanoss/.installed/kb.in-progress` exists. If a deployment fails or is interrupted, the file stays and the next run deploys the KB again, even if `version.json` already shows the new version.
+- The format of the installed KB is told by its `path` table, which only the crc64 KB has. Both formats publish the same versions (e.g. `26.10`), so a KB of the other format is refused before the version check. To switch from md5 to crc64, move `/var/lib/ldb/oss` away (or remove it) and run with `-F crc64`.
 - Without `-S` the services keep running while the KB is written.
 - Before anything is stopped, downloaded or copied, the script checks that the new KB fits: its size plus a buffer of `KB_MIN_FREE_GB` (in `config.sh`, default 50 GB) must not exceed the free space plus the space of the installed KB it overwrites. If it does not fit, the KB step fails and nothing is changed. The new KB size is `total_size_bytes` from the KB's `metadata.json` on the SFTP server (`-k`) or the size of the local `oss` folder (`-K`). This check replaces the one in `kb-download.sh`, which is called with `-f`. Files of the previous KB that the new one does not contain are not counted, as they are not removed.
 - `/var/lib/ldb` or `/var/lib/ldb/oss` can be a symlink to another disk (e.g. `/data/ldb`): disk space and ownership are handled on the folder it points to.

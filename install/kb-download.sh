@@ -6,8 +6,9 @@ set -e
 # SCANOSS Knowledge Base Download Script
 #
 # Downloads the full KB, a KB update, the test KB, a SQLite KB snapshot, an
-# HFH KB snapshot, or the cryptography rulesets from the SCANOSS SFTP server. Supports both lftp (parallel, resumable) and
-# sftp fallback.
+# HFH KB snapshot, or the cryptography rulesets from the SCANOSS SFTP server,
+# and the crc64 full KB, a crc64 KB update or the DuckDB files. Supports both
+# lftp (parallel, resumable) and sftp fallback.
 #
 # Run with -? for the full list of CLI flags.
 # All options are optional; any not provided will be prompted interactively
@@ -28,8 +29,12 @@ REMOTE_PATH_TEST="kb/test/oss"
 REMOTE_PATH_SQLITE="kb/sqlite"
 REMOTE_PATH_HFH="kb/hfh"
 REMOTE_PATH_CRYPTO_RULESETS="services/cryptography/rules/dca"
+REMOTE_PATH_CRC64_FULL="kb/crc64/full"
+REMOTE_PATH_CRC64_UPDATE="kb/crc64/update"
+REMOTE_PATH_DUCKDB="kb/duckdb"
 
-MODE=""            # "full", "update", "test", "sqlite", "hfh", or "crypto_rulesets"
+MODE=""            # "full", "update", "test", "sqlite", "hfh", "crypto_rulesets",
+                   # "crc64_full", "crc64_update", or "duckdb"
 DOWNLOAD_TOOL=""   # set during init: "lftp" or "sftp"
 SFTP_USER=""
 SFTP_PASS=""
@@ -97,7 +102,8 @@ usage() {
     echo "          [-r path] [-D path] [-y] [-f] [-C]"
     echo
     echo "Connection / mode options:"
-    echo "  -m    Download mode: full, update, test, sqlite, hfh, or crypto_rulesets"
+    echo "  -m    Download mode: full, update, test, sqlite, hfh, crypto_rulesets,"
+    echo "        crc64_full, crc64_update, or duckdb"
     echo "  -h    SFTP host"
     echo "  -P    SFTP port"
     echo "  -u    SFTP username"
@@ -111,17 +117,19 @@ usage() {
     echo "        fast links carrying already-dense data (hashes, indexes)."
     echo
     echo "Path / version overrides (skip the matching interactive prompt):"
-    echo "  -V    Version (full/update/sqlite/hfh/crypto_rulesets mode); default: latest"
-    echo "        from LATEST.txt"
+    echo "  -V    Version (every mode except test); default: latest from LATEST.txt"
     echo "  -o    Destination path:"
-    echo "          test mode -> test-KB destination (default: /var/lib/ldb/oss)"
-    echo "          full mode -> 'oss' folder destination (default: /var/lib/ldb/oss)"
-    echo "  -r    full mode: destination for non-oss items"
-    echo "        (default: /tmp/scanoss_kb_full_<version>)"
-    echo "  -D    update/sqlite/hfh/crypto_rulesets mode: download base directory"
-    echo "        (defaults: /tmp/scanoss_kb_update for update, cwd for the others."
-    echo "         Final path: <D>/<version> for update/sqlite/crypto_rulesets,"
-    echo "         <D>/<version>.zip for hfh.)"
+    echo "          test mode       -> test-KB destination (default: /var/lib/ldb/oss)"
+    echo "          full mode       -> 'oss' folder destination (default: /var/lib/ldb/oss)"
+    echo "          crc64_full mode -> 'oss' folder destination (no default: required"
+    echo "                             with -y, so it never lands on an md5 KB)"
+    echo "  -r    full/crc64_full mode: destination for non-oss items"
+    echo "        (default: /tmp/scanoss_kb_full_<version>, or"
+    echo "         /tmp/scanoss_kb_crc64_full_<version> for crc64_full)"
+    echo "  -D    update/crc64_update/sqlite/duckdb/hfh/crypto_rulesets mode: download"
+    echo "        base directory (defaults: /tmp/scanoss_kb_update for update,"
+    echo "        /tmp/scanoss_kb_crc64_update for crc64_update, cwd for the others."
+    echo "         Final path: <D>/<version>, or <D>/<version>.zip for hfh.)"
     echo
     echo "Non-interactive flags:"
     echo "  -y    Don't prompt; use defaults for unspecified values, auto-confirm"
@@ -336,6 +344,11 @@ download_path() {
     local remote_path="$1"
     local local_path="$2"
 
+    # A symlinked destination (e.g. /var/lib/ldb/oss -> /data/oss) is resolved
+    # first: lftp's mirror and the sftp rename below would replace the link
+    # with a real folder, putting the data on the link's filesystem instead.
+    [[ -L "$local_path" ]] && local_path=$(readlink -f "$local_path")
+
     if [[ "$DOWNLOAD_TOOL" == "lftp" ]]; then
         mkdir -p "$local_path"
         echo "Downloading ${remote_path} with lftp (${LFTP_THREADS} parallel threads, resumable)..."
@@ -461,6 +474,25 @@ verify_crypto_ruleset() {
     log "Cryptography ruleset ${version} checksum OK"
 }
 
+# Check each downloaded NAME.duckdb against the sha256 in its NAME.duckdb.sha256
+# ("<hash>  NAME.duckdb"). A mismatching file is removed by the user and
+# downloaded again: the other files are kept, as the download resumes.
+verify_duckdb() {
+    local dir="$1" db sum n=0
+    for db in "$dir"/*.duckdb; do
+        [[ -e "$db" ]] || continue
+        sum=$(grep -oE '^[0-9a-f]{64}' "${db}.sha256" 2>/dev/null | head -n1 || true)
+        [[ -n "$sum" ]] || die "No checksum in ${db}.sha256: the download is incomplete. Run the script again."
+        echo "Verifying $(basename "$db") ..."
+        echo "${sum}  ${db}" | sha256sum -c --quiet - >/dev/null 2>&1 \
+            || die "Checksum mismatch for ${db}. Remove it and run the script again."
+        n=$(( n + 1 ))
+    done
+    (( n > 0 )) || die "No .duckdb file in ${dir}: the download is incomplete. Run the script again."
+    echo "Checksums OK (${n} DuckDB file(s), sha256)."
+    log "DuckDB checksums OK in ${dir} (${n} file(s))"
+}
+
 # ---------------------------------------------------------------------------
 # Initialization
 # ---------------------------------------------------------------------------
@@ -542,14 +574,14 @@ init_download_tool() {
 prompt_missing_mode() {
     if [[ -n "$MODE" ]]; then
         case "$MODE" in
-            full|update|test|sqlite|hfh|crypto_rulesets) ;;
-            *) die "Invalid mode: ${MODE}. Use 'full', 'update', 'test', 'sqlite', 'hfh', or 'crypto_rulesets'." ;;
+            full|update|test|sqlite|hfh|crypto_rulesets|crc64_full|crc64_update|duckdb) ;;
+            *) die "Invalid mode: ${MODE}. Use 'full', 'update', 'test', 'sqlite', 'hfh', 'crypto_rulesets', 'crc64_full', 'crc64_update', or 'duckdb'." ;;
         esac
         return
     fi
 
     if [[ -n "$NON_INTERACTIVE" ]]; then
-        die "Mode is required in non-interactive mode. Pass -m full|update|test|sqlite|hfh|crypto_rulesets."
+        die "Mode is required in non-interactive mode. Pass -m full|update|test|sqlite|hfh|crypto_rulesets|crc64_full|crc64_update|duckdb."
     fi
 
     echo
@@ -560,9 +592,12 @@ prompt_missing_mode() {
     echo "  4) SQLite KB"
     echo "  5) HFH KB"
     echo "  6) Cryptography rulesets"
+    echo "  7) Full KB (crc64)"
+    echo "  8) KB update (crc64)"
+    echo "  9) DuckDB KB"
     echo
     while true; do
-        read -p "Select [1-6]: " choice
+        read -p "Select [1-9]: " choice
         case $choice in
             1) MODE="full"; break ;;
             2) MODE="update"; break ;;
@@ -570,9 +605,21 @@ prompt_missing_mode() {
             4) MODE="sqlite"; break ;;
             5) MODE="hfh"; break ;;
             6) MODE="crypto_rulesets"; break ;;
-            *) echo "Please enter 1, 2, 3, 4, 5, or 6." ;;
+            7) MODE="crc64_full"; break ;;
+            8) MODE="crc64_update"; break ;;
+            9) MODE="duckdb"; break ;;
+            *) echo "Please enter a number from 1 to 9." ;;
         esac
     done
+}
+
+# The crc64 'oss' folder has no default destination: /var/lib/ldb/oss may hold
+# an md5 KB, whose tables have the same names in another format. Checked
+# before connecting, so a scheduled run fails at once.
+check_crc64_full_dest() {
+    if [[ "$MODE" == "crc64_full" && -n "$NON_INTERACTIVE" && -z "$OSS_DEST" ]]; then
+        die "crc64_full needs the 'oss' folder destination (-o) in non-interactive mode. Do not point it at a folder holding an md5 KB."
+    fi
 }
 
 prompt_missing_connection() {
@@ -766,6 +813,20 @@ kb_download() {
             label="cryptography rulesets"
             default_download="."
             ;;
+        crc64_full)
+            remote_path="$REMOTE_PATH_CRC64_FULL"
+            label="full KB (crc64)"
+            ;;
+        crc64_update)
+            remote_path="$REMOTE_PATH_CRC64_UPDATE"
+            label="update (crc64)"
+            default_download="/tmp/scanoss_kb_crc64_update"
+            ;;
+        duckdb)
+            remote_path="$REMOTE_PATH_DUCKDB"
+            label="DuckDB KB"
+            default_download="."
+            ;;
     esac
 
     # Discover available versions. hfh is a flat directory of <version>.zip
@@ -784,10 +845,15 @@ kb_download() {
         versions=$(list_remote_dirs "$remote_path")
     fi
 
-    # The rulesets are not part of every subscription: the folder is only there
-    # for the accounts that have them.
-    if [[ -z "$versions" && "$mode" == "crypto_rulesets" ]]; then
-        die "The cryptography rulesets are not available for this account (no ${remote_path} on the server). Contact SCANOSS support to get access."
+    # The rulesets, the crc64 KB and the DuckDB files are not part of every
+    # subscription: their folders are only there for the accounts that have them.
+    if [[ -z "$versions" ]]; then
+        case "$mode" in
+            crypto_rulesets)
+                die "The cryptography rulesets are not available for this account (no ${remote_path} on the server). Contact SCANOSS support to get access." ;;
+            crc64_full|crc64_update|duckdb)
+                die "The ${label} is not available for this account (no ${remote_path} on the server). Contact SCANOSS support to get access." ;;
+        esac
     fi
     if [[ -z "$versions" ]]; then
         echo "No ${label} versions found on the server."
@@ -866,14 +932,25 @@ kb_download() {
     # Download location(s). hfh produces a single .zip file at $hfh_local_file;
     # other non-full modes produce a directory at $download_dir_path.
     local oss_dest="" rest_dest="" download_dir_path="" hfh_local_file="" disk_check_path=""
-    if [[ "$mode" == "full" ]]; then
+    if [[ "$mode" == "full" || "$mode" == "crc64_full" ]]; then
         local default_oss_dest="/var/lib/ldb/oss"
         local default_rest_dest="/tmp/scanoss_kb_full_${kb_version}"
+        if [[ "$mode" == "crc64_full" ]]; then
+            default_oss_dest=""   # see check_crc64_full_dest
+            default_rest_dest="/tmp/scanoss_kb_crc64_full_${kb_version}"
+        fi
 
         if [[ -n "$OSS_DEST" ]]; then
             oss_dest="$OSS_DEST"
         elif [[ -n "$NON_INTERACTIVE" ]]; then
             oss_dest="$default_oss_dest"
+        elif [[ "$mode" == "crc64_full" ]]; then
+            echo
+            echo "The crc64 'oss' folder has no default destination. Do not use a folder"
+            echo "holding an md5 KB (e.g. /var/lib/ldb/oss): the tables have the same names."
+            while [[ -z "$oss_dest" ]]; do
+                read -p "Destination for 'oss' folder: " oss_dest
+            done
         else
             echo
             read -p "Destination for 'oss' folder [${default_oss_dest}]: " oss_input
@@ -946,7 +1023,7 @@ kb_download() {
         if (( local_free < remote_size )); then
             echo
             echo "WARNING: Not enough disk space. Need ${remote_hr} but only ${local_hr} available."
-            if [[ "$mode" == "full" ]]; then
+            if [[ "$mode" == "full" || "$mode" == "crc64_full" ]]; then
                 echo "(Note: for full KB the 'oss' folder and the remaining files may end up on different"
                 echo " filesystems. The check above is against ${disk_check_path}.)"
             fi
@@ -988,7 +1065,7 @@ kb_download() {
     # Final confirmation (skipped under -y)
     echo
     local prompt_dest
-    if [[ "$mode" == "full" ]]; then
+    if [[ "$mode" == "full" || "$mode" == "crc64_full" ]]; then
         prompt_dest="${oss_dest} + ${rest_dest}"
     elif [[ "$mode" == "hfh" ]]; then
         prompt_dest="${hfh_local_file}"
@@ -1009,15 +1086,15 @@ kb_download() {
 
     log "Starting download of ${label} ${kb_version}"
 
-    if [[ "$mode" == "full" ]]; then
+    if [[ "$mode" == "full" || "$mode" == "crc64_full" ]]; then
         download_full_kb "${remote_path}/${kb_version}" "$oss_dest" "$rest_dest"
         echo
-        echo "Full KB downloaded:"
+        echo "${label^} downloaded:"
         echo "  oss folder:  ${oss_dest}"
         echo "  other files: ${rest_dest}"
-        log "Full KB ${kb_version} downloaded: oss=${oss_dest}, rest=${rest_dest}"
+        log "${label^} ${kb_version} downloaded: oss=${oss_dest}, rest=${rest_dest}"
         echo
-        echo "Finished downloading full KB."
+        echo "Finished downloading ${label}."
     elif [[ "$mode" == "hfh" ]]; then
         download_file "${remote_path}/${kb_version}.zip" "$hfh_local_file"
         echo
@@ -1028,12 +1105,13 @@ kb_download() {
     else
         download_path "${remote_path}/${kb_version}" "$download_dir_path"
         [[ "$mode" == "crypto_rulesets" ]] && verify_crypto_ruleset "$download_dir_path" "$kb_version"
+        [[ "$mode" == "duckdb" ]] && verify_duckdb "$download_dir_path"
         echo
         echo "${label^} downloaded to ${download_dir_path}"
         log "${label^} downloaded to ${download_dir_path}"
         echo
-        if [[ "$mode" == "update" ]]; then
-            echo "Finished downloading update."
+        if [[ "$mode" == "update" || "$mode" == "crc64_update" ]]; then
+            echo "Finished downloading ${label}."
             echo "Please run the ldb-import.sh script provided inside the update folder to import into the KB:"
             echo "  ${download_dir_path}/ldb-import.sh"
         else
@@ -1064,6 +1142,7 @@ log "Starting knowledge base download script..."
 init_download_tool
 [[ "$DOWNLOAD_TOOL" == "sftp" ]] && check_sshpass
 prompt_missing_mode
+check_crc64_full_dest
 init_compression_settings
 prompt_missing_connection
 check_connection

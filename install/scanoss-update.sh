@@ -11,7 +11,10 @@
 #   2. full KB (optional, -k or -K)   downloaded with kb-download.sh -y, or
 #                                     copied from a local folder, into
 #                                     /var/lib/ldb/oss (overwrite in place);
-#                                     skipped when that version is deployed
+#                                     skipped when that version is deployed.
+#                                     -F picks the KB format: md5 (default)
+#                                     or crc64; a KB of the other format is
+#                                     never overwritten
 #
 # Run with -? for the list of flags.
 ###############################################################################
@@ -22,7 +25,8 @@ source "$SCRIPT_DIR/config.sh"
 INSTALLER="$SCRIPT_DIR/install-scanoss.sh"
 KB_DOWNLOAD="$SCRIPT_DIR/kb-download.sh"
 KB_DIR="$LDB_LOCATION/oss"
-REMOTE_PATH_FULL="kb/full"
+REMOTE_PATH_FULL="kb/full"        # kb/crc64/full with -F crc64
+KB_DOWNLOAD_MODE="full"           # crc64_full with -F crc64
 LOCK_FILE="/var/lock/scanoss-update.lock"
 # Exists while a KB deployment is running or after one was interrupted. The KB
 # is overwritten in place, so version.json may already show the new version
@@ -33,6 +37,7 @@ KB_MARKER="$APP_DIR/.installed/kb.in-progress"
 SERVICES=""        # -s, passed to the installer
 KB_VERSION=""      # -k: "latest" or a version
 KB_PATH=""         # -K: local full KB folder (holds oss/)
+KB_FORMAT=""       # -F: md5 (default) or crc64
 STOP_SERVICES=""   # -S
 CLI_SFTP_HOST=""
 CLI_SFTP_PORT=""
@@ -43,7 +48,7 @@ CLI_SFTP_PASSWORD=""
 STOPPED_SERVICES=()
 
 usage() {
-    echo "Usage: $0 [-s services] [-k version | -K path] [-S] [-h host] [-P port] [-u user] [-p password]"
+    echo "Usage: $0 [-s services] [-k version | -K path] [-F format] [-S] [-h host] [-P port] [-u user] [-p password]"
     echo
     echo "Non-interactive update of SCANOSS binaries and, optionally, the full KB."
     echo
@@ -51,6 +56,8 @@ usage() {
     echo "        (passed to install-scanoss.sh)"
     echo "  -k    Deploy the full KB from SFTP: 'latest' or a version (e.g. 26.09)"
     echo "  -K    Deploy the full KB from a local folder holding oss/ (e.g. /data/26.09)"
+    echo "  -F    KB format for -k/-K: md5 (default) or crc64. A KB of the other"
+    echo "        format in ${KB_DIR} is never overwritten: move it away first"
     echo "  -S    Stop the active scanoss* services while the KB is deployed and"
     echo "        start them again afterwards (requires -k or -K)"
     echo "  -h    SFTP host (default: ${SFTP_HOST})"
@@ -68,11 +75,12 @@ die() {
 }
 
 parse_args() {
-    while getopts "s:k:K:Sh:P:u:p:?" opt; do
+    while getopts "s:k:K:F:Sh:P:u:p:?" opt; do
         case $opt in
             s) SERVICES="$OPTARG" ;;
             k) KB_VERSION="$OPTARG" ;;
             K) KB_PATH="$OPTARG" ;;
+            F) KB_FORMAT="$OPTARG" ;;
             S) STOP_SERVICES=1 ;;
             h) CLI_SFTP_HOST="$OPTARG" ;;
             P) CLI_SFTP_PORT="$OPTARG" ;;
@@ -87,6 +95,22 @@ parse_args() {
     if [[ -n "$KB_VERSION" && ! "$KB_VERSION" =~ ^[A-Za-z0-9._-]+$ ]]; then
         die "invalid KB version '$KB_VERSION'."
     fi
+    [[ -n "$KB_FORMAT" && -z "$KB_VERSION" && -z "$KB_PATH" ]] && die "-F requires -k or -K."
+    case "${KB_FORMAT:=md5}" in
+        md5) ;;
+        crc64)
+            REMOTE_PATH_FULL="kb/crc64/full"
+            KB_DOWNLOAD_MODE="crc64_full"
+            ;;
+        *) die "invalid KB format '$KB_FORMAT': use md5 or crc64." ;;
+    esac
+}
+
+# Format of the KB in an oss folder: crc64 has a path table (split out of the
+# md5 file table), md5 has none. Empty when the folder holds no KB.
+kb_format_of() {
+    [[ -f "$1/version.json" ]] || return 0
+    if [[ -d "$1/path" ]]; then echo crc64; else echo md5; fi
 }
 
 # Value of "monthly" in a version.json, empty if missing.
@@ -164,11 +188,13 @@ start_services() {
 }
 
 deploy_kb() {
-    local target
+    local target format
     if [[ -n "$KB_PATH" ]]; then
         [[ -f "$KB_PATH/oss/version.json" ]] || { echo "Error: $KB_PATH/oss/version.json not found: not a full KB folder."; return 1; }
         target=$(kb_version_of "$KB_PATH/oss/version.json")
         [[ -n "$target" ]] || { echo "Error: no \"monthly\" version in $KB_PATH/oss/version.json."; return 1; }
+        format=$(kb_format_of "$KB_PATH/oss")
+        [[ "$format" == "$KB_FORMAT" ]] || { echo "Error: $KB_PATH/oss holds a KB in the $format format, not $KB_FORMAT (-F $KB_FORMAT)."; return 1; }
     else
         load_kb_creds || return 1
         if [[ "$KB_VERSION" == "latest" ]]; then
@@ -177,6 +203,14 @@ deploy_kb() {
         else
             target="$KB_VERSION"
         fi
+    fi
+
+    # Before the version check: both formats publish the same versions (26.10),
+    # and overwriting in place would leave the other format's tables behind.
+    format=$(kb_format_of "$KB_DIR")
+    if [[ -n "$format" && "$format" != "$KB_FORMAT" ]]; then
+        echo "Error: $KB_DIR holds a KB in the $format format; -F $KB_FORMAT does not overwrite it. Move or remove it first."
+        return 1
     fi
 
     local installed
@@ -198,7 +232,7 @@ deploy_kb() {
     mkdir -p "$KB_DIR"
     check_kb_space "$new_size" || return 1
 
-    log "Deploying full KB $target to $KB_DIR (installed: ${installed:-none})"
+    log "Deploying $KB_FORMAT full KB $target to $KB_DIR (installed: ${installed:-none})"
     mkdir -p "$(dirname "$KB_MARKER")"
     echo "$target" > "$KB_MARKER"
 
@@ -210,7 +244,7 @@ deploy_kb() {
     else
         # -f: check_kb_space replaces kb-download.sh's own disk space check,
         # which ignores the space of the KB being overwritten and has no buffer.
-        "$KB_DOWNLOAD" -y -f -m full -V "$target" -o "$KB_DIR" \
+        "$KB_DOWNLOAD" -y -f -m "$KB_DOWNLOAD_MODE" -V "$target" -o "$KB_DIR" \
             -h "$SFTP_HOST" -P "$SFTP_PORT" -u "$SFTP_USER" -p "$SFTP_PASSWORD" || rc=1
     fi
 
